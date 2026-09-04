@@ -1,0 +1,6 @@
+{
+  "name": "ヘルマン輸出進捗管理システム",
+  "description": "Shipping Instruction (輸出指示書 PDF) から Gemini AI で自動データ抽出し、チーム全体で作業進捗とアクティビティログをリアルタイム管理するシステム",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

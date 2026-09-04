@@ -1,0 +1,46 @@
+{
+  "collections": [
+    {
+      "name": "shipments",
+      "fields": [
+        { "name": "mawbNumber", "type": "string" },
+        { "name": "hawbNumber", "type": "string", "optional": true },
+        { "name": "orderNumber", "type": "string" },
+        { "name": "shipper", "type": "string" },
+        { "name": "status", "type": "string" },
+        { "name": "createdAt", "type": "string" }
+      ],
+      "rules": {
+        "read": "true",
+        "create": "true",
+        "update": "true",
+        "delete": "true"
+      }
+    },
+    {
+      "name": "logs",
+      "fields": [
+        { "name": "shipmentId", "type": "string" },
+        { "name": "timestamp", "type": "string" }
+      ],
+      "rules": {
+        "read": "true",
+        "create": "true",
+        "update": "true",
+        "delete": "true"
+      }
+    },
+    {
+      "name": "pdfTemplates",
+      "fields": [
+        { "name": "name", "type": "string" }
+      ],
+      "rules": {
+        "read": "true",
+        "create": "true",
+        "update": "true",
+        "delete": "true"
+      }
+    }
+  ]
+}
