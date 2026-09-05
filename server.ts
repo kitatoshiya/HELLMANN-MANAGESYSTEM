@@ -300,8 +300,8 @@ app.delete('/api/billing-presets/:id', (req, res) => {
  * Handles temporary 503 (UNAVAILABLE / high demand / Deadline expired) or 429 quota depletion gracefully.
  */
 async function generateContentWithRetryAndFallback(ai: GoogleGenAI, requestParams: any) {
-  // Use gemini-3.7-flash as primary, fallback to gemini-3.1-flash-lite
-  const modelsToTry = ['gemini-3.7-flash', 'gemini-3.1-flash-lite'];
+  // Use gemini-3.8-flash as primary, fallback to gemini-3.7-flash and gemini-3.1-flash-lite
+  const modelsToTry = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
   let lastError: any = null;
 
   for (const modelName of modelsToTry) {

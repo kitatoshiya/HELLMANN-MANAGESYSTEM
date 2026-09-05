@@ -85,7 +85,8 @@ Rules:
       });
     }
 
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    // Use modern supported Gemini models (gemini-1.5-flash is deprecated/not found)
+    const modelsToTry = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
     let lastError: any = null;
     let responseText = '';
 
