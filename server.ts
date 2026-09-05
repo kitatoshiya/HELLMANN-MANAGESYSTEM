@@ -49,8 +49,12 @@ app.get('/api/health', (req, res) => {
  * Server-side persistent PDF storage for multi-user / multi-terminal access
  */
 const PDF_STORE_DIR = path.join(process.cwd(), 'data', 'pdfs');
-if (!fs.existsSync(PDF_STORE_DIR)) {
-  fs.mkdirSync(PDF_STORE_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(PDF_STORE_DIR)) {
+    fs.mkdirSync(PDF_STORE_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignored in read-only serverless environments
 }
 
 const pdfServerCache = new Map<string, string>();
@@ -112,8 +116,12 @@ app.post('/api/shipment-pdfs', (req, res) => {
  * Shared Server-side Billing Pattern Presets Store
  */
 const DATA_DIR = path.join(process.cwd(), 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignored in read-only serverless environments
 }
 const PRESETS_FILE = path.join(DATA_DIR, 'billing_presets.json');
 
