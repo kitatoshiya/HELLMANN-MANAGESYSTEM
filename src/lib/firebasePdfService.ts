@@ -6,6 +6,13 @@ import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 const PDF_FIRESTORE_COLLECTION = 'shipment_pdf_data';
 const CHUNK_SIZE = 700000; // ~700KB safe margin per chunk under 1MB Firestore doc limit
 
+// Track whether Firebase Storage bucket is accessible (avoids repeated browser CORS preflight errors)
+let isFirebaseStorageDisabled = false;
+
+export function disableFirebaseStorage(): void {
+  isFirebaseStorageDisabled = true;
+}
+
 /**
  * Upload PDF directly to Firestore (and Storage fallback) as reliable permanent multi-terminal cloud storage
  */
@@ -49,16 +56,21 @@ export async function uploadPdfToFirebase(
     console.warn('[firebasePdfService] Firestore PDF write warning:', fsErr);
   }
 
-  // 2. Secondary: Try Firebase Storage if bucket is provisioned
-  try {
-    const storageRef = ref(storage, `shipment_pdfs/${cleanId}.pdf`);
-    await uploadString(storageRef, pdfDataUrl, 'data_url');
-    const downloadUrl = await getDownloadURL(storageRef);
-    return downloadUrl;
-  } catch (storageErr) {
-    // Expected when Firebase Storage bucket is not enabled; Firestore direct blob storage handles permanent sync.
-    return 'firestore_saved';
+  // 2. Secondary: Try Firebase Storage if bucket is provisioned and not disabled by CORS
+  if (!isFirebaseStorageDisabled) {
+    try {
+      const storageRef = ref(storage, `shipment_pdfs/${cleanId}.pdf`);
+      await uploadString(storageRef, pdfDataUrl, 'data_url');
+      const downloadUrl = await getDownloadURL(storageRef);
+      return downloadUrl;
+    } catch (storageErr) {
+      // Expected when Firebase Storage bucket is not enabled or CORS is not set for this domain.
+      // Disable further Storage calls to avoid polluting console with CORS/net::ERR_FAILED errors.
+      isFirebaseStorageDisabled = true;
+      return 'firestore_saved';
+    }
   }
+  return 'firestore_saved';
 }
 
 /**
@@ -105,23 +117,26 @@ export async function getPdfFromFirebase(shipmentId: string): Promise<string | n
     console.warn('[firebasePdfService] Firestore PDF lookup error:', fsErr);
   }
 
-  // 2. Try direct Storage URL check
-  try {
-    const storageRef = ref(storage, `shipment_pdfs/${cleanId}.pdf`);
-    const downloadUrl = await getDownloadURL(storageRef);
-    if (downloadUrl) {
-      const res = await fetch(downloadUrl);
-      if (res.ok) {
-        const blob = await res.blob();
-        return new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.readAsDataURL(blob);
-        });
+  // 2. Try direct Storage URL check only if Storage is not disabled
+  if (!isFirebaseStorageDisabled) {
+    try {
+      const storageRef = ref(storage, `shipment_pdfs/${cleanId}.pdf`);
+      const downloadUrl = await getDownloadURL(storageRef);
+      if (downloadUrl) {
+        const res = await fetch(downloadUrl);
+        if (res.ok) {
+          const blob = await res.blob();
+          return new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.readAsDataURL(blob);
+          });
+        }
       }
+    } catch {
+      // File doesn't exist in Storage or CORS restricted
+      isFirebaseStorageDisabled = true;
     }
-  } catch {
-    // File doesn't exist in Storage
   }
 
   return null;

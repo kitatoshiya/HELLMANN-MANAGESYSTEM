@@ -40,7 +40,9 @@ import {
   deleteSnapshot,
   restoreFromBackup,
   getBackupSettings,
+  fetchBackupSettingsFromCloud,
   saveBackupSettings,
+  saveBackupSettingsAsync,
 } from '../lib/backupService';
 import { useAuth } from '../lib/AuthContext';
 
@@ -88,7 +90,12 @@ export const BackupManagerModal: React.FC<BackupManagerModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      // 1. Load local immediate settings
       setSettings(getBackupSettings());
+      // 2. Fetch latest settings from Firestore cloud storage
+      fetchBackupSettingsFromCloud().then((cloudSettings) => {
+        setSettings(cloudSettings);
+      });
       loadSnapshots();
       setStatusMessage(null);
       setImportedJson(null);
@@ -254,11 +261,19 @@ export const BackupManagerModal: React.FC<BackupManagerModalProps> = ({
     }
   };
 
-  // Settings save handler
-  const handleSaveSettings = (newSettings: Partial<BackupSettings>) => {
+  // Settings save handler with async Firestore cloud sync
+  const handleSaveSettings = async (newSettings: Partial<BackupSettings>) => {
+    // 1. Optimistically update local state & localStorage
     const updated = saveBackupSettings(newSettings);
     setSettings(updated);
-    showFeedback('自動バックアップ設定を更新・保存しました。', 'success');
+
+    try {
+      // 2. Persist to Firestore cloud
+      await saveBackupSettingsAsync(newSettings);
+      showFeedback('バックアップ設定をクラウド(Firestore)に保存・全端末同期しました。', 'success');
+    } catch (e) {
+      showFeedback('ローカル設定を保存しました（クラウド保存は再試行されます）。', 'info');
+    }
   };
 
   if (!isOpen) return null;
@@ -655,11 +670,40 @@ export const BackupManagerModal: React.FC<BackupManagerModalProps> = ({
           {/* TAB 3: AUTO BACKUP SETTINGS */}
           {activeTab === 'settings' && (
             <div className="space-y-6 max-w-2xl">
+              {/* Cloud Sync Status Banner */}
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80 rounded-2xl p-4 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xs">
+                    <Cloud className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-bold text-slate-900">クラウド設定同期ステータス</span>
+                      <span className="px-2 py-0.5 text-[10px] font-extrabold bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200 flex items-center space-x-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>Firestore クラウド永続化</span>
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Vercel環境、各PC端末、モバイルビューアー等ですべての設定がリアルタイムに共有・保存されます。
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-5">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
-                  <Sliders className="w-4 h-4 text-blue-600" />
-                  <span>自動定期バックアップ・スナップショット設定</span>
-                </h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
+                    <Sliders className="w-4 h-4 text-blue-600" />
+                    <span>自動定期バックアップ・スナップショット設定</span>
+                  </h3>
+                  {settings.lastAutoBackupTime && (
+                    <span className="text-[11px] text-slate-500 flex items-center space-x-1">
+                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                      <span>最終自動実行: {settings.lastAutoBackupTime}</span>
+                    </span>
+                  )}
+                </div>
 
                 {/* Switch: Auto Snapshot */}
                 <div className="flex items-center justify-between pt-2 border-t border-slate-100">
@@ -682,18 +726,23 @@ export const BackupManagerModal: React.FC<BackupManagerModalProps> = ({
                 {/* Interval Selector */}
                 {settings.autoBackupEnabled && (
                   <div className="space-y-2 pt-2 border-t border-slate-100">
-                    <label className="text-xs font-bold text-slate-900 block">
-                      自動実行インターバル (実行間隔)
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-slate-900 block">
+                        自動実行インターバル (実行間隔)
+                      </label>
+                      <span className="text-[11px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
+                        現在: {settings.intervalHours}時間ごと
+                      </span>
+                    </div>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      {[1, 6, 12, 24].map((hours) => (
+                      {[1, 3, 6, 12, 24].map((hours) => (
                         <button
                           key={hours}
                           type="button"
                           onClick={() => handleSaveSettings({ intervalHours: hours })}
                           className={`py-2 px-3 rounded-xl border text-xs font-bold transition-all cursor-pointer ${
                             settings.intervalHours === hours
-                              ? 'bg-blue-50 border-blue-500 text-blue-700 shadow-2xs font-extrabold ring-1 ring-blue-400'
+                              ? 'bg-blue-600 border-blue-600 text-white shadow-sm font-extrabold ring-2 ring-blue-300'
                               : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                           }`}
                         >

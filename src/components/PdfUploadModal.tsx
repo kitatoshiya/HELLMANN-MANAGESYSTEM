@@ -222,9 +222,17 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
             }),
           });
 
-          const data = await response.json();
+          let data: any = null;
+          const rawText = await response.text();
+          try {
+            data = JSON.parse(rawText);
+          } catch {
+            if (!response.ok) {
+              throw new Error(`サーバーエラーが発生しました (Status ${response.status})。Vercelの環境変数 GEMINI_API_KEY が設定されているか確認してください。`);
+            }
+          }
 
-          if (data.success && data.data) {
+          if (data && data.success && data.data) {
             setAnalysisStep(
               hasCache
                 ? '⚡ 位置情報キャッシュを適用し、処理時間を短縮（0.3秒で解析完了）'

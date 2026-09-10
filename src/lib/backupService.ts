@@ -1,5 +1,5 @@
 import { ref, uploadString, getDownloadURL, deleteObject } from 'firebase/storage';
-import { collection, doc, setDoc, getDocs, deleteDoc, getDoc, query, orderBy, limit } from 'firebase/firestore';
+import { collection, doc, setDoc, getDocs, deleteDoc, getDoc, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db, storage } from './firebase';
 import {
   Shipment,
@@ -17,6 +17,8 @@ import { fetchAllTaskMasters, saveTaskMaster } from './taskMasterService';
 const BACKUP_SETTINGS_KEY = 'export_app_backup_settings_v1';
 const LOCAL_SNAPSHOTS_KEY = 'export_app_local_backup_snapshots_v1';
 const SNAPSHOTS_COLLECTION = 'backup_snapshots';
+const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
+const BACKUP_CONFIG_DOC = 'backup_config';
 
 export const DEFAULT_BACKUP_SETTINGS: BackupSettings = {
   autoBackupEnabled: true,
@@ -26,6 +28,8 @@ export const DEFAULT_BACKUP_SETTINGS: BackupSettings = {
   autoDownloadJson: false,
   retentionCount: 30,
 };
+
+let cachedSettings: BackupSettings | null = null;
 
 function formatNowJapanese(d: Date = new Date()): string {
   const y = d.getFullYear();
@@ -47,27 +51,130 @@ function formatFilenameTimestamp(d: Date = new Date()): string {
   return `${y}${m}${day}_${h}${min}${s}`;
 }
 
-// 1. Get & Save Backup Settings
+// 1. Get & Save Backup Settings (with Firestore Cloud Persistence)
 export function getBackupSettings(): BackupSettings {
+  if (cachedSettings) {
+    return cachedSettings;
+  }
   try {
     const saved = localStorage.getItem(BACKUP_SETTINGS_KEY);
     if (saved) {
-      return { ...DEFAULT_BACKUP_SETTINGS, ...JSON.parse(saved) };
+      cachedSettings = { ...DEFAULT_BACKUP_SETTINGS, ...JSON.parse(saved) };
+      return cachedSettings;
     }
   } catch (e) {
     // Ignore error
   }
-  return DEFAULT_BACKUP_SETTINGS;
+  cachedSettings = { ...DEFAULT_BACKUP_SETTINGS };
+  return cachedSettings;
 }
 
+/**
+ * Fetch latest backup settings from Firestore cloud storage
+ */
+export async function fetchBackupSettingsFromCloud(): Promise<BackupSettings> {
+  try {
+    const docRef = doc(db, SYSTEM_SETTINGS_COLLECTION, BACKUP_CONFIG_DOC);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data() as Partial<BackupSettings>;
+      const merged: BackupSettings = {
+        ...DEFAULT_BACKUP_SETTINGS,
+        ...getBackupSettings(),
+        ...data,
+      };
+      cachedSettings = merged;
+      try {
+        localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(merged));
+      } catch (e) {}
+      return merged;
+    }
+  } catch (err) {
+    console.warn('[backupService] Failed to fetch backup settings from Firestore, using local fallback:', err);
+  }
+  return getBackupSettings();
+}
+
+/**
+ * Realtime subscribe to cloud backup settings changes across terminals/sessions
+ */
+export function subscribeBackupSettings(onUpdate: (settings: BackupSettings) => void): () => void {
+  try {
+    const docRef = doc(db, SYSTEM_SETTINGS_COLLECTION, BACKUP_CONFIG_DOC);
+    const unsubscribe = onSnapshot(
+      docRef,
+      (snap) => {
+        if (snap.exists()) {
+          const cloudData = snap.data() as Partial<BackupSettings>;
+          const updated: BackupSettings = {
+            ...DEFAULT_BACKUP_SETTINGS,
+            ...getBackupSettings(),
+            ...cloudData,
+          };
+          cachedSettings = updated;
+          try {
+            localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(updated));
+          } catch (e) {}
+          onUpdate(updated);
+        }
+      },
+      (err) => {
+        console.warn('[backupService] Backup settings subscription error:', err);
+      }
+    );
+    return unsubscribe;
+  } catch (e) {
+    return () => {};
+  }
+}
+
+/**
+ * Save backup settings to both local storage AND Firestore cloud
+ */
 export function saveBackupSettings(settings: Partial<BackupSettings>): BackupSettings {
   const current = getBackupSettings();
   const updated = { ...current, ...settings };
+  cachedSettings = updated;
+
+  // 1. Save to LocalStorage immediately
   try {
     localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(updated));
   } catch (e) {
     // Ignore error
   }
+
+  // 2. Persist to Firestore Cloud in background
+  try {
+    const docRef = doc(db, SYSTEM_SETTINGS_COLLECTION, BACKUP_CONFIG_DOC);
+    setDoc(docRef, { ...updated, updatedAt: new Date().toISOString() }, { merge: true }).catch((err) => {
+      console.warn('[backupService] Failed to save backup settings to Firestore:', err);
+    });
+  } catch (e) {
+    console.warn('[backupService] Firestore sync error:', e);
+  }
+
+  return updated;
+}
+
+/**
+ * Async version of saveBackupSettings that awaits Firestore confirmation
+ */
+export async function saveBackupSettingsAsync(settings: Partial<BackupSettings>): Promise<BackupSettings> {
+  const current = getBackupSettings();
+  const updated = { ...current, ...settings };
+  cachedSettings = updated;
+
+  try {
+    localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(updated));
+  } catch (e) {}
+
+  try {
+    const docRef = doc(db, SYSTEM_SETTINGS_COLLECTION, BACKUP_CONFIG_DOC);
+    await setDoc(docRef, { ...updated, updatedAt: new Date().toISOString() }, { merge: true });
+  } catch (err) {
+    console.warn('[backupService] Firestore async save warning:', err);
+  }
+
   return updated;
 }
 
@@ -151,6 +258,9 @@ export async function downloadBackupJson(customPayload?: BackupPayload): Promise
   saveBackupSettings({ lastManualBackupTime: formatNowJapanese(new Date()) });
 }
 
+// Track whether Firebase Storage is accessible without CORS issues
+let isStorageDisabled = false;
+
 // 4. Save Snapshot to Firebase Storage & log metadata to Firestore
 export async function saveSnapshotToFirebaseStorage(
   type: 'AUTO' | 'MANUAL' = 'MANUAL',
@@ -182,28 +292,32 @@ export async function saveSnapshotToFirebaseStorage(
   };
 
   try {
-    // 1. Upload to Firebase Storage
-    try {
-      const storageRef = ref(storage, storagePath);
-      await uploadString(storageRef, jsonStr, 'raw', {
-        contentType: 'application/json',
-        customMetadata: {
-          system: 'export-progress-system',
-          version: '1.0',
-          type,
-          shipmentsCount: String(payload.stats.shipmentsCount),
-        },
-      });
-
+    // 1. Upload to Firebase Storage if not disabled
+    if (!isStorageDisabled) {
       try {
-        storageDownloadUrl = await getDownloadURL(storageRef);
-        meta.storageDownloadUrl = storageDownloadUrl;
-      } catch (urlErr) {
-        // Ignore URL get error in restricted dev environments
+        const storageRef = ref(storage, storagePath);
+        await uploadString(storageRef, jsonStr, 'raw', {
+          contentType: 'application/json',
+          customMetadata: {
+            system: 'export-progress-system',
+            version: '1.0',
+            type,
+            shipmentsCount: String(payload.stats.shipmentsCount),
+          },
+        });
+
+        try {
+          storageDownloadUrl = await getDownloadURL(storageRef);
+          meta.storageDownloadUrl = storageDownloadUrl;
+        } catch (urlErr) {
+          // Ignore URL get error
+        }
+      } catch (storageErr) {
+        // Disable further Storage attempts to prevent CORS preflight errors in console
+        isStorageDisabled = true;
+        (meta as any).backupPayload = payload;
       }
-    } catch (storageErr) {
-      console.warn('Firebase Storage upload failed, writing snapshot to Firestore backup index:', storageErr);
-      // Fallback: Store payload inside Firestore snapshot document if Storage has bucket restrictions
+    } else {
       (meta as any).backupPayload = payload;
     }
 
@@ -333,8 +447,8 @@ export async function downloadSnapshotPayload(snapshot: BackupSnapshotMeta): Pro
     // Ignore error
   }
 
-  // 3. Fallback: Try downloading from storage ref
-  if (snapshot.storagePath) {
+  // 3. Fallback: Try downloading from storage ref only if Storage is not disabled
+  if (!isStorageDisabled && snapshot.storagePath) {
     try {
       const storageRef = ref(storage, snapshot.storagePath);
       const url = await getDownloadURL(storageRef);
@@ -343,7 +457,7 @@ export async function downloadSnapshotPayload(snapshot: BackupSnapshotMeta): Pro
         return (await res.json()) as BackupPayload;
       }
     } catch (e) {
-      console.error('Failed to download snapshot from storage path:', e);
+      isStorageDisabled = true;
     }
   }
 
@@ -437,16 +551,28 @@ export async function restoreFromBackup(
 
 // 9. Periodic Auto Backup Background Runner
 let autoBackupIntervalTimer: any = null;
+let unsubscribeSettingsListener: (() => void) | null = null;
 
 export function initAutoBackupListener(): () => void {
   if (autoBackupIntervalTimer) {
     clearInterval(autoBackupIntervalTimer);
   }
+  if (unsubscribeSettingsListener) {
+    unsubscribeSettingsListener();
+    unsubscribeSettingsListener = null;
+  }
 
-  // Check immediately on startup
-  checkAndRunAutoBackup();
+  // 1. Fetch latest settings from Firestore cloud on startup
+  fetchBackupSettingsFromCloud().then((cloudSettings) => {
+    checkAndRunAutoBackup(cloudSettings);
+  });
 
-  // Run check every 60 seconds
+  // 2. Realtime subscribe to cloud settings updates
+  unsubscribeSettingsListener = subscribeBackupSettings((updatedSettings) => {
+    console.log('[AutoBackup] Synchronized backup settings from Firestore cloud:', updatedSettings);
+  });
+
+  // 3. Run periodic interval check every 60 seconds
   autoBackupIntervalTimer = setInterval(() => {
     checkAndRunAutoBackup();
   }, 60 * 1000);
@@ -456,11 +582,15 @@ export function initAutoBackupListener(): () => void {
       clearInterval(autoBackupIntervalTimer);
       autoBackupIntervalTimer = null;
     }
+    if (unsubscribeSettingsListener) {
+      unsubscribeSettingsListener();
+      unsubscribeSettingsListener = null;
+    }
   };
 }
 
-async function checkAndRunAutoBackup(): Promise<void> {
-  const settings = getBackupSettings();
+async function checkAndRunAutoBackup(overrideSettings?: BackupSettings): Promise<void> {
+  const settings = overrideSettings || getBackupSettings();
   if (!settings.autoBackupEnabled) return;
 
   const now = new Date();
@@ -478,7 +608,7 @@ async function checkAndRunAutoBackup(): Promise<void> {
 
   // Perform auto backup
   try {
-    console.log('[AutoBackup] Running periodic background snapshot to Firebase Storage...');
+    console.log('[AutoBackup] Running periodic background snapshot to Firebase Storage & Firestore...');
     await saveSnapshotToFirebaseStorage('AUTO', {
       name: '自動バックアップエージェント',
       email: 'autobackup@export-logistics.co.jp',
