@@ -891,10 +891,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
 
                   // User registered comments / memo
                   const memoCount = s.comments?.length || 0;
-                  const hasImportantMemo = s.comments?.some((c) => c.isImportant);
+                  const importantComments = (s.comments || []).filter((c) => c.isImportant);
+                  const hasImportantMemo = importantComments.length > 0;
+                  const latestImportantComment = hasImportantMemo
+                    ? [...importantComments].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
+                    : null;
+                  const importantSnippet = latestImportantComment ? latestImportantComment.content.trim().slice(0, 20) : '';
                   const latestComment = memoCount > 0 ? s.comments![0] : null;
                   const memoTooltip = memoCount > 0
-                    ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
+                    ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n${latestImportantComment ? `[重要メモ] ${latestImportantComment.content}\n\n` : ''}最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
                     : '';
 
                   return (
@@ -947,15 +952,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                               {/* User Memo / Comment Count Badge */}
                               {memoCount > 0 && (
                                 <span
-                                  className={`px-1.5 py-0.5 text-[10px] font-bold rounded border flex items-center space-x-1 transition-colors ${
+                                  className={`px-1.5 py-0.5 text-[10px] font-bold rounded border flex items-center space-x-1 transition-colors max-w-[240px] ${
                                     hasImportantMemo
-                                      ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700 font-black shadow-xs ring-1 ring-rose-300 animate-pulse'
+                                      ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700 font-black shadow-xs ring-1 ring-rose-300'
                                       : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-300'
                                   }`}
                                   title={memoTooltip}
                                 >
                                   <MessageSquareText className={`w-3 h-3 shrink-0 ${hasImportantMemo ? 'text-white' : 'text-indigo-600'}`} />
-                                  <span>{hasImportantMemo ? `🔴 重要メモ ${memoCount}件` : `メモ ${memoCount}件`}</span>
+                                  <span className="truncate">
+                                    {hasImportantMemo ? `🔴 ${memoCount}件: ${importantSnippet}` : `メモ ${memoCount}件`}
+                                  </span>
                                 </span>
                               )}
                               {(() => {

@@ -1055,39 +1055,40 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
           </button>
         </form>
 
-        {/* 直近メモのクイックプレビュー */}
+        {/* 直近メモのクイックプレビュー (全文表示) */}
         {shipment.comments && shipment.comments.length > 0 && (
-          <div className="pt-1 flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-[11px] font-bold text-slate-500 shrink-0">最新のメモ:</span>
-            <div className="flex-1 flex flex-wrap items-center gap-2 overflow-hidden">
-              {shipment.comments.slice(0, 2).map((c) => (
+          <div className="pt-1 flex flex-col sm:flex-row sm:items-start gap-2 text-xs">
+            <span className="text-[11px] font-bold text-slate-500 shrink-0 sm:pt-1">最新のメモ:</span>
+            <div className="flex-1 flex flex-wrap items-center gap-2">
+              {shipment.comments.slice(0, 3).map((c) => (
                 <div
                   key={c.id}
                   onClick={() => setActiveTab('comments')}
-                  className={`border rounded-xl px-2.5 py-1 text-[11px] flex items-center space-x-2 cursor-pointer shadow-2xs transition-colors ${
+                  className={`border rounded-xl px-3 py-1.5 text-[11px] flex items-center flex-wrap gap-x-2 gap-y-1 cursor-pointer shadow-2xs transition-colors ${
                     c.isImportant
                       ? 'bg-rose-50 hover:bg-rose-100 border-rose-300 text-rose-900 ring-1 ring-rose-300 font-semibold'
-                      : 'bg-white/80 hover:bg-white border-blue-200/80 text-slate-700'
+                      : 'bg-white/90 hover:bg-white border-blue-200/90 text-slate-700'
                   }`}
-                  title="クリックで全コメント一覧へ移動"
+                  title="クリックでチームコメント詳細一覧へ移動"
                 >
                   {c.isImportant && (
-                    <span className="px-1.5 py-0.2 bg-rose-600 text-white font-black text-[9.5px] rounded shadow-2xs">
-                      🔴 重要
+                    <span className="px-1.5 py-0.5 bg-rose-600 text-white font-black text-[9.5px] rounded shadow-2xs shrink-0 flex items-center gap-0.5">
+                      <span>🔴</span>
+                      <span>重要</span>
                     </span>
                   )}
-                  <span className={`font-bold ${c.isImportant ? 'text-rose-800' : 'text-blue-700'}`}>{c.authorName}:</span>
-                  <span className={`truncate max-w-[200px] ${c.isImportant ? 'text-rose-950 font-bold' : 'text-slate-800'}`}>{c.content}</span>
-                  <span className="text-[10px] text-slate-400 font-mono">({c.formattedTime.split(' ')[1] || c.formattedTime})</span>
+                  <span className={`font-bold shrink-0 ${c.isImportant ? 'text-rose-800' : 'text-blue-700'}`}>{c.authorName}:</span>
+                  <span className={`whitespace-normal break-words ${c.isImportant ? 'text-rose-950 font-bold' : 'text-slate-800'}`}>{c.content}</span>
+                  <span className="text-[10px] text-slate-400 font-mono shrink-0">({c.formattedTime.split(' ')[1] || c.formattedTime})</span>
                 </div>
               ))}
-              {shipment.comments.length > 2 && (
+              {shipment.comments.length > 3 && (
                 <button
                   type="button"
                   onClick={() => setActiveTab('comments')}
-                  className="text-[11px] font-bold text-blue-600 hover:underline"
+                  className="text-[11px] font-bold text-blue-600 hover:underline px-1 py-1"
                 >
-                  他{shipment.comments.length - 2}件を見る →
+                  他{shipment.comments.length - 3}件の全メモを見る →
                 </button>
               )}
             </div>

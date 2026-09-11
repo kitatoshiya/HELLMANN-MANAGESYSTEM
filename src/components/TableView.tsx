@@ -126,9 +126,15 @@ export const TableView: React.FC<TableViewProps> = ({
         comparison = getProgressInfo(a.tasks).percent - getProgressInfo(b.tasks).percent;
         break;
       case 'memo': {
-        const aCount = a.comments?.length || 0;
-        const bCount = b.comments?.length || 0;
-        comparison = aCount - bCount;
+        const aImportant = (a.comments || []).some(c => c.isImportant) ? 1 : 0;
+        const bImportant = (b.comments || []).some(c => c.isImportant) ? 1 : 0;
+        if (aImportant !== bImportant) {
+          comparison = aImportant - bImportant;
+        } else {
+          const aCount = a.comments?.length || 0;
+          const bCount = b.comments?.length || 0;
+          comparison = aCount - bCount;
+        }
         break;
       }
       default:
@@ -185,8 +191,13 @@ export const TableView: React.FC<TableViewProps> = ({
               const mawb = shipment.mawbNumber || (shipment as any).mawb || '';
               const hawb = shipment.hawbNumber || (shipment as any).hawb || '';
               const hasComments = shipment.comments && shipment.comments.length > 0;
-              const hasImportantMemo = shipment.comments?.some(c => c.isImportant);
+              const importantComments = (shipment.comments || []).filter(c => c.isImportant);
+              const hasImportantMemo = importantComments.length > 0;
+              const latestImportantMemo = hasImportantMemo
+                ? [...importantComments].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
+                : null;
               const memoCount = shipment.comments?.length || 0;
+              const importantSnippet = latestImportantMemo ? latestImportantMemo.content.trim().slice(0, 20) : '';
               
               return (
                 <React.Fragment key={shipment.id}>
@@ -289,13 +300,28 @@ export const TableView: React.FC<TableViewProps> = ({
                       </div>
                     </td>
                     <td className="px-2.5 py-1 text-center" onClick={e => { e.stopPropagation(); onSelectShipment(shipment); }}>
-                      {memoCount > 0 ? (
+                      {hasImportantMemo && latestImportantMemo ? (
+                        <div
+                          className="inline-flex items-center gap-1.5 cursor-pointer px-1.5 py-0.5 rounded-md bg-rose-50 border border-rose-200 text-rose-900 hover:bg-rose-100 hover:border-rose-300 transition-all max-w-[260px]"
+                          title={`【最新の重要メモ】\n${latestImportantMemo.content}\n\n【全メモ (${memoCount}件)】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.isImportant ? '★重要 ' : ''}${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
+                        >
+                          <div className="flex items-center gap-0.5 shrink-0">
+                            <FileText className="w-3.5 h-3.5 text-rose-600 animate-pulse" />
+                            <span className="text-[10px] font-bold text-rose-700 whitespace-nowrap">
+                              {memoCount}件
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-extrabold text-rose-900 truncate leading-tight bg-white/80 px-1 py-0.5 rounded border border-rose-200/70">
+                            {importantSnippet}
+                          </span>
+                        </div>
+                      ) : memoCount > 0 ? (
                         <div
                           className="inline-flex items-center justify-center cursor-pointer px-1.5 py-0.5 rounded-full hover:bg-amber-100/60 transition-colors"
                           title={`【メモ ${memoCount}件】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
                         >
-                          <FileText className={`w-3.5 h-3.5 ${hasImportantMemo ? 'text-rose-600 animate-pulse' : 'text-amber-500'}`} />
-                          <span className={`text-[10px] ml-1 font-bold ${hasImportantMemo ? 'text-rose-700' : 'text-amber-700'}`}>
+                          <FileText className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="text-[10px] ml-1 font-bold text-amber-700 whitespace-nowrap">
                             {memoCount}件
                           </span>
                         </div>
