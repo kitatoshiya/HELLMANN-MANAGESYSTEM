@@ -60,17 +60,33 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+import os from 'os';
+
 /**
  * Server-side persistent PDF storage for multi-user / multi-terminal access
  */
-const PDF_STORE_DIR = path.join(process.cwd(), 'data', 'pdfs');
-try {
-  if (!fs.existsSync(PDF_STORE_DIR)) {
-    fs.mkdirSync(PDF_STORE_DIR, { recursive: true });
+const getPdfStoreDir = (): string => {
+  const primaryDir = path.join(process.cwd(), 'data', 'pdfs');
+  try {
+    if (!fs.existsSync(primaryDir)) {
+      fs.mkdirSync(primaryDir, { recursive: true });
+    }
+    const testFile = path.join(primaryDir, `.write-test-${Date.now()}`);
+    fs.writeFileSync(testFile, 'test');
+    fs.unlinkSync(testFile);
+    return primaryDir;
+  } catch {
+    const tmpDir = path.join(os.tmpdir(), 'export_mgmt_pdfs');
+    try {
+      if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir, { recursive: true });
+      }
+    } catch {}
+    return tmpDir;
   }
-} catch (e) {
-  // Ignored in read-only serverless environments
-}
+};
+
+const PDF_STORE_DIR = getPdfStoreDir();
 
 const pdfServerCache = new Map<string, string>();
 
@@ -85,17 +101,23 @@ app.get('/api/shipment-pdfs/:id', (req, res) => {
       return res.json({ success: true, pdfDataUrl: pdfServerCache.get(safeId) });
     }
 
-    const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
-    if (fs.existsSync(filePath)) {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      pdfServerCache.set(safeId, data.pdfDataUrl);
-      return res.json({ success: true, pdfDataUrl: data.pdfDataUrl });
+    try {
+      const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
+      if (fs.existsSync(filePath)) {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        if (data && data.pdfDataUrl) {
+          pdfServerCache.set(safeId, data.pdfDataUrl);
+          return res.json({ success: true, pdfDataUrl: data.pdfDataUrl });
+        }
+      }
+    } catch (e) {
+      // Ignored if disk read fails in serverless
     }
 
     return res.json({ success: false, pdfDataUrl: null, message: 'PDF not found on server' });
   } catch (err: any) {
     console.error('Error in GET /api/shipment-pdfs:', err);
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(200).json({ success: false, pdfDataUrl: null, error: err?.message || 'Server error' });
   }
 });
 
@@ -171,7 +193,7 @@ app.all(['/upload/*', '//upload/*', '/upload', '/api/upload/*'], (req, res) => {
 
 app.post('/api/shipment-pdfs', (req, res) => {
   try {
-    const { shipmentId, pdfDataUrl, aliases } = req.body;
+    const { shipmentId, pdfDataUrl, aliases } = req.body || {};
     if (!shipmentId || !pdfDataUrl) {
       return res.status(400).json({ success: false, error: 'shipmentId and pdfDataUrl required' });
     }
@@ -182,18 +204,22 @@ app.post('/api/shipment-pdfs', (req, res) => {
       const safeId = String(rawId).trim().replace(/[^a-zA-Z0-9_-]/g, '_');
       pdfServerCache.set(safeId, pdfDataUrl);
 
-      const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
-      fs.writeFileSync(
-        filePath,
-        JSON.stringify({ shipmentId: rawId, pdfDataUrl, updatedAt: new Date().toISOString() }),
-        'utf8'
-      );
+      try {
+        const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({ shipmentId: rawId, pdfDataUrl, updatedAt: new Date().toISOString() }),
+          'utf8'
+        );
+      } catch (e) {
+        // Disk write fallback in read-only environment
+      }
     }
 
     return res.json({ success: true, savedIds: idsToSave });
   } catch (err: any) {
     console.error('Error in POST /api/shipment-pdfs:', err);
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(200).json({ success: false, error: err?.message || 'Failed to save PDF' });
   }
 });
 
