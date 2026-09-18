@@ -223,16 +223,25 @@ export function safeLocalStorageSetItem(key: string, value: string): boolean {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
-        const trimmed = parsed.slice(-15).map((item: any) => {
+        const cleanItem = (item: any) => {
           if (item && typeof item === 'object') {
             const copy = { ...item };
             delete copy.bodyHtml;
-            if (typeof copy.bodyText === 'string') copy.bodyText = copy.bodyText.substring(0, 300);
-            if (typeof copy.body === 'string') copy.body = copy.body.substring(0, 300);
+            delete copy.htmlBody;
+            delete copy.htmlContent;
+            delete copy.rawHtml;
+            delete copy.pdfDataUrl;
+            delete copy.pdfBase64;
+            delete copy.rawPayload;
+            delete copy.payload;
+            delete copy.attachmentData;
+            if (typeof copy.bodyText === 'string') copy.bodyText = copy.bodyText.substring(0, 200);
+            if (typeof copy.body === 'string') copy.body = copy.body.substring(0, 200);
+            if (typeof copy.details === 'string') copy.details = copy.details.substring(0, 200);
             if (Array.isArray(copy.attachments)) {
               copy.attachments = copy.attachments.map((att: any) => {
                 if (att && typeof att === 'object') {
-                  const { dataUrl, ...rest } = att;
+                  const { dataUrl, content, ...rest } = att;
                   return rest;
                 }
                 return att;
@@ -241,11 +250,14 @@ export function safeLocalStorageSetItem(key: string, value: string): boolean {
             return copy;
           }
           return item;
-        });
-        const trimmedStr = JSON.stringify(trimmed);
-        if (trySet(trimmedStr)) {
-          console.log(`[localStorage] Successfully saved aggressively trimmed array for '${key}'.`);
-          return true;
+        };
+
+        for (const count of [15, 8, 4, 2]) {
+          const trimmed = parsed.slice(-count).map(cleanItem);
+          if (trySet(JSON.stringify(trimmed))) {
+            console.log(`[localStorage] Successfully saved aggressively trimmed array (${count} items) for '${key}'.`);
+            return true;
+          }
         }
       }
     } catch (_) {}
