@@ -442,7 +442,7 @@ export function initializeFirebaseStorage() {
       recordFirestoreRead('logs_and_notifications', snapshot.docs.length, snapshot.metadata.fromCache, 'storageManager (logs snapshot)');
     }
     try {
-      safeLocalStorageSetItem(STORAGE_KEYS.LOGS, JSON.stringify(cachedLogs));
+      safeLocalStorageSetItem(STORAGE_KEYS.LOGS, JSON.stringify(cachedLogs.slice(0, 30)));
     } catch(e){}
     notifyListeners();
   }, (err) => {
@@ -1208,7 +1208,7 @@ export function getEmailLogs(shipmentIdOrMawb?: string): CustomsEmailLog[] {
 
   if (hasUpdated) {
     try {
-      safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(allLogs));
+      safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(allLogs.slice(0, 30)));
     } catch (e) {
       console.warn('Failed to cache initial email logs:', e);
     }
@@ -1248,7 +1248,7 @@ export function addCustomsEmailLog(
 
   const updatedLogs = [logWithId, ...allLogs.filter((l) => l.id !== logWithId.id)];
   try {
-    safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(updatedLogs));
+    safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(updatedLogs.slice(0, 30)));
   } catch (e) {
     console.warn('Failed to save email log to storage:', e);
   }

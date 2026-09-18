@@ -33,7 +33,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Mount Microsoft 365 Graph API proxy router
-app.use('/api/m365', m365Router);
+app.use(['/api/m365', '/m365'], m365Router);
 
 // Initialize Gemini SDK lazily
 function getGeminiClient() {

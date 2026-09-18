@@ -3,6 +3,25 @@ import express from 'express';
 export const m365Router = express.Router();
 
 /**
+ * In-memory resolution cache to avoid redundant round-trips to Microsoft Graph
+ */
+const mailboxResolutionCache = new Map<string, { data: MailboxResolution; expiresAt: number }>();
+
+/**
+ * Helper to fetch with a timeout
+ */
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 6000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Acquire Microsoft Graph OAuth 2.0 Access Token using client credentials
  */
 async function getGraphAccessToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
@@ -14,13 +33,13 @@ async function getGraphAccessToken(tenantId: string, clientId: string, clientSec
   params.append('client_secret', clientSecret);
   params.append('grant_type', 'client_credentials');
 
-  const resp = await fetch(tokenEndpoint, {
+  const resp = await fetchWithTimeout(tokenEndpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: params.toString(),
-  });
+  }, 5000);
 
   const data = (await resp.json()) as any;
   if (!resp.ok || !data.access_token) {
@@ -56,177 +75,126 @@ async function resolveMailboxTarget(
     return { success: false, error: '対象のメールアドレスまたはUPNが指定されていません。' };
   }
 
-  // 1. If explicit UPN or direct email, attempt direct user lookup
-  try {
-    const directResp = await fetch(
-      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(identifierToTry)}?$select=id,displayName,mail,userPrincipalName`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      }
-    );
+  const cacheKey = `${identifierToTry.toLowerCase()}`;
+  const cached = mailboxResolutionCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
 
-    if (directResp.ok) {
-      const u = (await directResp.json()) as any;
-      return {
+  // 1. Direct user / group lookup by ID or UPN
+  try {
+    const isGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifierToTry);
+
+    const [directUserResp, directGroupResp] = await Promise.all([
+      fetchWithTimeout(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(identifierToTry)}?$select=id,displayName,mail,userPrincipalName`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+        4000
+      ).catch(() => null),
+      isGuid
+        ? fetchWithTimeout(
+            `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(identifierToTry)}?$select=id,displayName,mail`,
+            { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+            4000
+          ).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    if (directUserResp && directUserResp.ok) {
+      const u = (await directUserResp.json()) as any;
+      const res: MailboxResolution = {
         success: true,
         userId: u.id,
         userPrincipalName: u.userPrincipalName,
         displayName: u.displayName || u.mail || identifierToTry,
         mail: u.mail || u.userPrincipalName || identifierToTry,
       };
+      mailboxResolutionCache.set(cacheKey, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+      return res;
+    }
+
+    if (directGroupResp && directGroupResp.ok) {
+      const g = (await directGroupResp.json()) as any;
+      const res: MailboxResolution = {
+        success: true,
+        userId: g.id,
+        userPrincipalName: g.mail || targetEmail || '',
+        displayName: g.displayName || targetEmail,
+        mail: g.mail || targetEmail,
+        isGroup: true,
+      };
+      mailboxResolutionCache.set(cacheKey, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+      return res;
     }
   } catch (err) {
-    console.warn('Direct user lookup warning:', err);
+    console.warn('Direct user/group lookup error:', err);
   }
 
-  // 2. Query users where mail == targetEmail or userPrincipalName == targetEmail
-  try {
-    const filterQuery = encodeURIComponent(
-      `mail eq '${targetEmail}' or userPrincipalName eq '${targetEmail}'`
-    );
-    const filterResp = await fetch(
-      `https://graph.microsoft.com/v1.0/users?$filter=${filterQuery}&$select=id,displayName,mail,userPrincipalName`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      }
-    );
-
-    if (filterResp.ok) {
-      const data = (await filterResp.json()) as any;
-      if (Array.isArray(data.value) && data.value.length > 0) {
-        const u = data.value[0];
-        return {
-          success: true,
-          userId: u.id,
-          userPrincipalName: u.userPrincipalName,
-          displayName: u.displayName || u.mail || targetEmail,
-          mail: u.mail || u.userPrincipalName || targetEmail,
-        };
-      }
-    }
-  } catch (err) {
-    console.warn('Filter user lookup warning:', err);
-  }
-
-  // 3. Check proxyAddresses (common for aliases and shared mailboxes)
-  try {
-    const proxyQuery = encodeURIComponent(
-      `proxyAddresses/any(p:p eq 'smtp:${targetEmail}') or proxyAddresses/any(p:p eq 'SMTP:${targetEmail}')`
-    );
-    const proxyResp = await fetch(
-      `https://graph.microsoft.com/v1.0/users?$filter=${proxyQuery}&$select=id,displayName,mail,userPrincipalName`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      }
-    );
-
-    if (proxyResp.ok) {
-      const data = (await proxyResp.json()) as any;
-      if (Array.isArray(data.value) && data.value.length > 0) {
-        const u = data.value[0];
-        return {
-          success: true,
-          userId: u.id,
-          userPrincipalName: u.userPrincipalName,
-          displayName: u.displayName || u.mail || targetEmail,
-          mail: u.mail || u.userPrincipalName || targetEmail,
-        };
-      }
-    }
-  } catch (err) {
-    console.warn('Proxy addresses lookup warning:', err);
-  }
-
-  // 4. Check if it's a Microsoft 365 Group (Unified Group)
-  let groupPermissionDenied = false;
+  // 2. Parallel query across Users & Groups
   try {
     const emailPrefix = targetEmail.split('@')[0] || '';
-    const groupFilters = [
-      `mail eq '${targetEmail}'`,
-      `mailNickname eq '${emailPrefix}'`,
-      `displayName eq 'TAC Hellmann TEAM'`,
-      `mail eq '${emailPrefix}@tacjapan.onmicrosoft.com'`,
-      `proxyAddresses/any(p:p eq 'smtp:${targetEmail}') or proxyAddresses/any(p:p eq 'SMTP:${targetEmail}')`,
-    ];
+    const userFilter = encodeURIComponent(`mail eq '${targetEmail}' or userPrincipalName eq '${targetEmail}'`);
+    const groupFilter = encodeURIComponent(`mail eq '${targetEmail}' or mailNickname eq '${emailPrefix}'`);
 
-    // If identifier is a GUID (Object ID), try direct group lookup
-    const isGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifierToTry);
-    if (isGuid) {
-      const directGroupResp = await fetch(
-        `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(identifierToTry)}?$select=id,displayName,mail`,
-        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
-      );
-      if (directGroupResp.ok) {
-        const g = (await directGroupResp.json()) as any;
-        return {
+    const [userFilterResp, groupFilterResp] = await Promise.all([
+      fetchWithTimeout(
+        `https://graph.microsoft.com/v1.0/users?$filter=${userFilter}&$select=id,displayName,mail,userPrincipalName`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+        4000
+      ).catch(() => null),
+      fetchWithTimeout(
+        `https://graph.microsoft.com/v1.0/groups?$filter=${groupFilter}&$select=id,displayName,mail`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+        4000
+      ).catch(() => null),
+    ]);
+
+    if (userFilterResp && userFilterResp.ok) {
+      const uData = (await userFilterResp.json()) as any;
+      if (Array.isArray(uData.value) && uData.value.length > 0) {
+        const u = uData.value[0];
+        const res: MailboxResolution = {
+          success: true,
+          userId: u.id,
+          userPrincipalName: u.userPrincipalName,
+          displayName: u.displayName || u.mail || targetEmail,
+          mail: u.mail || u.userPrincipalName || targetEmail,
+        };
+        mailboxResolutionCache.set(cacheKey, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+        return res;
+      }
+    }
+
+    if (groupFilterResp && groupFilterResp.ok) {
+      const gData = (await groupFilterResp.json()) as any;
+      if (Array.isArray(gData.value) && gData.value.length > 0) {
+        const g = gData.value[0];
+        const res: MailboxResolution = {
           success: true,
           userId: g.id,
-          userPrincipalName: (g.mail && !isGuid) ? g.mail : (targetEmail && !isGuid) ? targetEmail : '',
+          userPrincipalName: g.mail || targetEmail || '',
           displayName: g.displayName || targetEmail,
           mail: g.mail || targetEmail,
           isGroup: true,
         };
-      }
-    }
-
-    for (const f of groupFilters) {
-      const groupResp = await fetch(
-        `https://graph.microsoft.com/v1.0/groups?$filter=${encodeURIComponent(f)}&$select=id,displayName,mail`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/json',
-          },
-        }
-      );
-
-      if (groupResp.status === 403) {
-        groupPermissionDenied = true;
-        break;
-      }
-
-      if (groupResp.ok) {
-        const data = (await groupResp.json()) as any;
-        if (Array.isArray(data.value) && data.value.length > 0) {
-          const g = data.value[0];
-          return {
-            success: true,
-            userId: g.id,
-            userPrincipalName: (g.mail && !isGuid) ? g.mail : (targetEmail && !isGuid) ? targetEmail : '',
-            displayName: g.displayName || targetEmail,
-            mail: g.mail || targetEmail,
-            isGroup: true,
-          };
-        }
+        mailboxResolutionCache.set(cacheKey, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+        return res;
       }
     }
   } catch (err) {
-    console.warn('Group lookup warning:', err);
+    console.warn('Parallel user/group query error:', err);
   }
 
-  // 5. Fetch candidate users and groups from the tenant to assist diagnosis
+  // 3. Fallback: Lookup candidate users from tenant
   let availableUsers: Array<{ id: string; displayName: string; mail: string; userPrincipalName: string }> = [];
   try {
-    const listResp = await fetch(
+    const listResp = await fetchWithTimeout(
       `https://graph.microsoft.com/v1.0/users?$select=id,displayName,mail,userPrincipalName&$top=25`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      }
-    );
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+      3000
+    ).catch(() => null);
 
-    if (listResp.ok) {
+    if (listResp && listResp.ok) {
       const data = (await listResp.json()) as any;
       if (Array.isArray(data.value)) {
         availableUsers = data.value.map((u: any) => ({
@@ -236,7 +204,6 @@ async function resolveMailboxTarget(
           userPrincipalName: u.userPrincipalName || '',
         }));
 
-        // Prefix match check (e.g. tac-hellmann)
         const prefix = targetEmail.split('@')[0]?.toLowerCase();
         if (prefix) {
           const match = availableUsers.find(
@@ -246,7 +213,7 @@ async function resolveMailboxTarget(
               (u.displayName && u.displayName.toLowerCase().includes(prefix))
           );
           if (match) {
-            return {
+            const res: MailboxResolution = {
               success: true,
               userId: match.id,
               userPrincipalName: match.userPrincipalName,
@@ -254,21 +221,14 @@ async function resolveMailboxTarget(
               mail: match.mail || match.userPrincipalName,
               availableUsers,
             };
+            mailboxResolutionCache.set(cacheKey, { data: res, expiresAt: Date.now() + 30 * 60 * 1000 });
+            return res;
           }
         }
       }
     }
   } catch (err) {
     console.warn('Tenant users listing warning:', err);
-  }
-
-  if (groupPermissionDenied) {
-    return {
-      success: false,
-      userNotFound: true,
-      error: `「${targetEmail}」はMicrosoft 365グループ（TAC Hellmann TEAM）として構成されていますが、Azure AD（Entra ID）のアプリ登録に【Group.Read.All】または【Group.ReadWrite.All】のAPIアクセス許可が付与されていません。Azure Portalの [APIのアクセス許可] にて追加し「管理者の同意」を与えてください。`,
-      availableUsers,
-    };
   }
 
   return {
@@ -521,22 +481,22 @@ m365Router.post('/sync', async (req, res) => {
 
     // A. If target is a Microsoft 365 Group (Unified Group)
     if (resolution.isGroup) {
-      let attachmentFetchCount = 0;
       const threadsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
         resolution.userId
-      )}/threads?$top=${limit}&$orderby=lastDeliveredDateTime%20desc&$select=id,topic,hasAttachments,lastDeliveredDateTime,uniqueSenders,toRecipients,ccRecipients`;
+      )}/threads?$top=${Math.min(limit, 20)}&$orderby=lastDeliveredDateTime%20desc&$select=id,topic,hasAttachments,lastDeliveredDateTime,uniqueSenders,toRecipients,ccRecipients`;
 
-      const threadsResp = await fetch(threadsUrl, {
+      const threadsResp = await fetchWithTimeout(threadsUrl, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      });
+      }, 5000).catch(() => null);
 
-      if (!threadsResp.ok) {
-        const errJson = (await threadsResp.json().catch(() => ({}))) as any;
-        console.warn(`[M365 Group Sync Warning] (${threadsResp.status}):`, errJson.error?.message || threadsResp.statusText);
+      if (!threadsResp || !threadsResp.ok) {
+        const status = threadsResp ? threadsResp.status : 504;
+        const errJson = threadsResp ? ((await threadsResp.json().catch(() => ({}))) as any) : {};
+        console.warn(`[M365 Group Sync Warning] (${status}):`, errJson.error?.message || (threadsResp ? threadsResp.statusText : 'Timeout'));
         return res.json({
           success: false,
-          userNotFound: threadsResp.status === 404,
-          error: `M365グループ「${targetEmail}」の会話取得失敗 (${threadsResp.status}): ${errJson.error?.message || threadsResp.statusText}。Azure ADアプリ登録の【Group.Read.All】APIアクセス許可をご確認ください。`,
+          userNotFound: status === 404,
+          error: `M365グループ「${targetEmail}」の会話取得失敗 (${status}): ${errJson.error?.message || (threadsResp ? threadsResp.statusText : '接続タイムアウト')}。Azure ADアプリ登録の【Group.Read.All】APIアクセス許可をご確認ください。`,
           availableUsers: resolution.availableUsers || [],
           inboxCount: 0,
           sentCount: 0,
@@ -545,13 +505,13 @@ m365Router.post('/sync', async (req, res) => {
         });
       }
 
-      const threadsData = (await threadsResp.json()) as any;
+      const threadsData = (await threadsResp.json().catch(() => ({}))) as any;
       const threads: any[] = Array.isArray(threadsData.value) ? threadsData.value : [];
       const processedInbox: any[] = [];
       const processedSent: any[] = [];
 
-      // Fetch posts for top threads in parallel (max 15 threads)
-      const targetThreads = threads.slice(0, 15);
+      // Fetch posts for top active threads in parallel (max 8 threads for speed)
+      const targetThreads = threads.slice(0, 8);
       const threadResults = await Promise.all(
         targetThreads.map(async (thread) => {
           try {
@@ -565,12 +525,12 @@ m365Router.post('/sync', async (req, res) => {
 
             const postsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
               resolution.userId
-            )}/threads/${thread.id}/posts?$top=15&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
-            const postsResp = await fetch(postsUrl, {
+            )}/threads/${thread.id}/posts?$top=10&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
+            const postsResp = await fetchWithTimeout(postsUrl, {
               headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-            });
+            }, 3500).catch(() => null);
 
-            if (!postsResp.ok) return { inbox: [], sent: [] };
+            if (!postsResp || !postsResp.ok) return { inbox: [], sent: [] };
             const postsData = (await postsResp.json().catch(() => ({}))) as any;
             const posts: any[] = Array.isArray(postsData.value) ? postsData.value : [];
 
@@ -659,22 +619,20 @@ m365Router.post('/sync', async (req, res) => {
     }
 
     // B. If target is a standard User or Shared Mailbox
-    // 1. Fetch messages from Inbox with expand=attachments (single round-trip, no N+1 query loops)
     const inboxUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       targetUserIdentifier
-    )}/mailFolders/inbox/messages?$top=${limit}&$orderby=receivedDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead&$expand=attachments($select=id,name,contentType,size,isInline)`;
+    )}/mailFolders/inbox/messages?$top=${limit}&$orderby=receivedDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead`;
 
-    // 2. Fetch messages from SentItems with expand=attachments
     const sentUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       targetUserIdentifier
-    )}/mailFolders/sentitems/messages?$top=${limit}&$orderby=sentDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,sentDateTime,hasAttachments,isRead&$expand=attachments($select=id,name,contentType,size,isInline)`;
+    )}/mailFolders/sentitems/messages?$top=${limit}&$orderby=sentDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,sentDateTime,hasAttachments,isRead`;
 
     const [inboxResp, sentResp] = await Promise.all([
       fetchInbox
-        ? fetch(inboxUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
+        ? fetchWithTimeout(inboxUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }, 5000).catch(() => null)
         : Promise.resolve(null),
       fetchSent
-        ? fetch(sentUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
+        ? fetchWithTimeout(sentUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }, 5000).catch(() => null)
         : Promise.resolve(null),
     ]);
 
