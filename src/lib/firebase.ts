@@ -10,8 +10,11 @@ delete (firebaseConfig as any).firestoreDatabaseId;
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 
-// ★ここを変更：カッコなしの "default" を明示的に指定します！
-export const db = getFirestore(app, "default");
+// Initialize Firestore with default database or explicitly configured databaseId
+const dbId = (rawConfig as any)?.firestoreDatabaseId;
+export const db = dbId && dbId !== '(default)' && dbId !== 'default'
+  ? getFirestore(app, dbId)
+  : getFirestore(app);
 export const storage = getStorage(app);
 
 export default app;

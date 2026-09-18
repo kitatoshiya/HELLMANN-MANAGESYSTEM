@@ -9,20 +9,7 @@ export default function handler(req: any, res: any) {
 
   return res.status(200).json({
     status: 'ok',
-    service: 'tac-export-mgmt-api',
-    endpoints: [
-      '/api/health',
-      '/api/parse-pdf',
-      '/api/analyze-xray-pdf',
-      '/api/m365/sync',
-      '/api/m365/send',
-      '/api/m365/test-connection',
-      '/api/m365/users',
-      '/api/m365/attachment',
-      '/api/m365/message-attachments',
-      '/api/billing-presets',
-      '/api/shipment-pdfs',
-    ],
     timestamp: new Date().toISOString(),
+    env: process.env.VERCEL ? 'vercel' : 'node',
   });
 }
