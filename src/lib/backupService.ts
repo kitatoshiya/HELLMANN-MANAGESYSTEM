@@ -258,8 +258,9 @@ export async function downloadBackupJson(customPayload?: BackupPayload): Promise
   saveBackupSettings({ lastManualBackupTime: formatNowJapanese(new Date()) });
 }
 
-// Track whether Firebase Storage is accessible without CORS issues
-let isStorageDisabled = false;
+// Track whether Firebase Storage is accessible without CORS issues.
+// Default to true so snapshots are saved directly to Firestore/localStorage without CORS errors.
+let isStorageDisabled = true;
 
 // 4. Save Snapshot to Firebase Storage & log metadata to Firestore
 export async function saveSnapshotToFirebaseStorage(
@@ -563,9 +564,15 @@ export function initAutoBackupListener(): () => void {
   }
 
   // 1. Fetch latest settings from Firestore cloud on startup
-  fetchBackupSettingsFromCloud().then((cloudSettings) => {
-    checkAndRunAutoBackup(cloudSettings);
-  });
+  fetchBackupSettingsFromCloud()
+    .then((cloudSettings) => {
+      checkAndRunAutoBackup(cloudSettings).catch((err) => {
+        console.warn('[AutoBackup] Startup auto backup check warning:', err);
+      });
+    })
+    .catch((err) => {
+      console.warn('[AutoBackup] Fetch settings on startup warning:', err);
+    });
 
   // 2. Realtime subscribe to cloud settings updates
   unsubscribeSettingsListener = subscribeBackupSettings((updatedSettings) => {
@@ -574,7 +581,9 @@ export function initAutoBackupListener(): () => void {
 
   // 3. Run periodic interval check every 60 seconds
   autoBackupIntervalTimer = setInterval(() => {
-    checkAndRunAutoBackup();
+    checkAndRunAutoBackup().catch((err) => {
+      console.warn('[AutoBackup] Periodic check error:', err);
+    });
   }, 60 * 1000);
 
   return () => {
@@ -590,24 +599,25 @@ export function initAutoBackupListener(): () => void {
 }
 
 async function checkAndRunAutoBackup(overrideSettings?: BackupSettings): Promise<void> {
-  const settings = overrideSettings || getBackupSettings();
-  if (!settings.autoBackupEnabled) return;
+  try {
+    const settings = overrideSettings || getBackupSettings();
+    if (!settings?.autoBackupEnabled) return;
 
-  const now = new Date();
-  const intervalMs = (settings.intervalHours || 6) * 60 * 60 * 1000;
+    const now = new Date();
+    const intervalMs = (settings.intervalHours || 6) * 60 * 60 * 1000;
 
-  if (settings.lastAutoBackupTime) {
-    const lastDate = new Date(settings.lastAutoBackupTime.replace(/\//g, '-'));
-    if (!isNaN(lastDate.getTime())) {
-      const elapsed = now.getTime() - lastDate.getTime();
-      if (elapsed < intervalMs) {
-        return; // Interval not yet reached
+    if (settings.lastAutoBackupTime) {
+      const timeStr = String(settings.lastAutoBackupTime);
+      const lastDate = new Date(timeStr.replace(/\//g, '-'));
+      if (!isNaN(lastDate.getTime())) {
+        const elapsed = now.getTime() - lastDate.getTime();
+        if (elapsed < intervalMs) {
+          return; // Interval not yet reached
+        }
       }
     }
-  }
 
-  // Perform auto backup
-  try {
+    // Perform auto backup
     console.log('[AutoBackup] Running periodic background snapshot to Firebase Storage & Firestore...');
     await saveSnapshotToFirebaseStorage('AUTO', {
       name: '自動バックアップエージェント',
@@ -620,6 +630,6 @@ async function checkAndRunAutoBackup(overrideSettings?: BackupSettings): Promise
       await downloadBackupJson();
     }
   } catch (err) {
-    console.error('[AutoBackup] Error during auto backup execution:', err);
+    console.warn('[AutoBackup] Auto backup execution deferred/handled:', err);
   }
 }

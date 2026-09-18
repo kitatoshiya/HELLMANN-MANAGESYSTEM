@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Shipment } from './types';
-import { getShipments, getShipmentById, subscribeToStore, resetToDemoData } from './lib/storageManager';
+import { Shipment, HellmannNewOrderEmail } from './types';
+import { getShipments, getShipmentById, subscribeToStore } from './lib/storageManager';
 import { initAutoBackupListener } from './lib/backupService';
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
@@ -16,7 +16,12 @@ import { ToastContainer } from './components/ToastContainer';
 import { SystemNotificationSettingsModal } from './components/SystemNotificationSettingsModal';
 import { FirestoreReadMetricsDashboard } from './components/FirestoreReadMetricsDashboard';
 import { SplashScreen } from './components/SplashScreen';
+import { HellmannNewOrderBanner } from './components/HellmannNewOrderBanner';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { M365SettingsModal } from './components/M365SettingsModal';
+import { M365MailClient } from './components/M365MailClient';
 import { initCutTimeMonitor } from './lib/notificationService';
+import { initM365SettingsCloudSync, fetchM365SettingsFromCloud, initM365AutoSyncTimers } from './lib/m365EmailService';
 import { AuthProvider, useAuth } from './lib/AuthContext';
 import { AuthScreen } from './components/AuthScreen';
 import { Loader2, Flame, BarChart2 } from 'lucide-react';
@@ -33,6 +38,10 @@ function MainApp() {
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
   const [isNotificationSettingsOpen, setIsNotificationSettingsOpen] = useState(false);
   const [isFirestoreMetricsOpen, setIsFirestoreMetricsOpen] = useState(false);
+  const [isM365SettingsOpen, setIsM365SettingsOpen] = useState(false);
+  const [isM365MailClientOpen, setIsM365MailClientOpen] = useState(false);
+  const [pendingOrderFileForImport, setPendingOrderFileForImport] = useState<File | null>(null);
+  const [orderEmailForImport, setOrderEmailForImport] = useState<HellmannNewOrderEmail | null>(null);
   const [todayTrigger, setTodayTrigger] = useState<number>(0);
 
   const handleSelectToday = () => {
@@ -58,6 +67,7 @@ function MainApp() {
 
     // Initial load when user is authenticated
     loadShipments();
+    fetchM365SettingsFromCloud();
 
     // Subscribe to store updates with proper cleanup
     const unsubscribeStore = subscribeToStore(() => {
@@ -66,6 +76,12 @@ function MainApp() {
 
     // Start automated background backup timer
     const unsubscribeAutoBackup = initAutoBackupListener();
+
+    // Start M365 settings real-time cloud sync across team members
+    const unsubscribeM365Sync = initM365SettingsCloudSync();
+
+    // Start automated background email sync timers (independent Inbox & Sent cycles)
+    const unsubscribeM365AutoSync = initM365AutoSyncTimers();
 
     // Start automated approaching cut-off time monitor (excluding completed)
     const unsubscribeCutTimeMonitor = initCutTimeMonitor(
@@ -85,6 +101,8 @@ function MainApp() {
     return () => {
       unsubscribeStore();
       unsubscribeAutoBackup();
+      unsubscribeM365Sync();
+      unsubscribeM365AutoSync();
       unsubscribeCutTimeMonitor();
       window.removeEventListener('keydown', handleKeyDown);
     };
@@ -118,17 +136,23 @@ function MainApp() {
     return <StandaloneTaskView />;
   }
 
+  const isMailViewRequested = searchParams?.get('view') === 'mail';
+  if (isMailViewRequested || isM365MailClientOpen) {
+    return (
+      <M365MailClient
+        onClose={() => setIsM365MailClientOpen(false)}
+        onSelectShipment={(shipmentId) => {
+          setIsM365MailClientOpen(false);
+          setSelectedShipmentId(shipmentId);
+        }}
+      />
+    );
+  }
+
   const selectedShipment = selectedShipmentId ? getShipmentById(selectedShipmentId) : null;
 
   const handleShipmentCreated = (shipmentId: string) => {
     setSelectedShipmentId(shipmentId);
-  };
-
-  const handleResetDemo = () => {
-    if (confirm('初期データ（案件・タスク・ログ）をリセットしますか？')) {
-      resetToDemoData();
-      setSelectedShipmentId(null);
-    }
   };
 
   return (
@@ -146,12 +170,12 @@ function MainApp() {
       <Navbar
         onOpenUpload={() => setIsUploadOpen(true)}
         onOpenSpecs={() => setIsSpecsOpen(true)}
-        onResetDemo={handleResetDemo}
         onSelectToday={handleSelectToday}
         onOpenXrayAnalysis={() => setIsXrayModalOpen(true)}
         onOpenReport={() => setIsReportOpen(true)}
         onOpenBackup={() => setIsBackupModalOpen(true)}
         onOpenNotificationSettings={() => setIsNotificationSettingsOpen(true)}
+        onOpenM365Settings={() => setIsM365MailClientOpen(true)}
         onShowSplash={() => setShowSplash(true)}
       />
 
@@ -160,6 +184,20 @@ function MainApp() {
 
       {/* Main Body */}
       <main className="flex-1 w-full max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Hellmann Incoming Orders Alert Banner (Visible on Dashboard) */}
+        {!selectedShipment && (
+          <ErrorBoundary fallbackTitle="新着通関依頼バナー">
+            <HellmannNewOrderBanner
+              onStartSiImport={(file, order) => {
+                setPendingOrderFileForImport(file);
+                setOrderEmailForImport(order);
+                setIsUploadOpen(true);
+              }}
+              onOpenSettings={() => setIsM365MailClientOpen(true)}
+            />
+          </ErrorBoundary>
+        )}
+
         {selectedShipment ? (
           <ShipmentDetail
             shipment={selectedShipment}
@@ -198,8 +236,24 @@ function MainApp() {
 
       <PdfUploadModal
         isOpen={isUploadOpen}
-        onClose={() => setIsUploadOpen(false)}
-        onShipmentCreated={handleShipmentCreated}
+        onClose={() => {
+          setIsUploadOpen(false);
+          setPendingOrderFileForImport(null);
+          setOrderEmailForImport(null);
+        }}
+        onShipmentCreated={(sId) => {
+          handleShipmentCreated(sId);
+          setPendingOrderFileForImport(null);
+          setOrderEmailForImport(null);
+        }}
+        initialFile={pendingOrderFileForImport}
+        initialOrderEmailId={orderEmailForImport?.id}
+        initialOrderSubject={orderEmailForImport?.subject}
+      />
+
+      <M365SettingsModal
+        isOpen={isM365SettingsOpen}
+        onClose={() => setIsM365SettingsOpen(false)}
       />
 
       <SystemSpecModal
@@ -256,8 +310,10 @@ function MainApp() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <MainApp />
-    </AuthProvider>
+    <ErrorBoundary fallbackTitle="輸出進捗管理システム">
+      <AuthProvider>
+        <MainApp />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

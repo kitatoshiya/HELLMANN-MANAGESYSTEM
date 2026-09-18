@@ -6,8 +6,12 @@ import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 const PDF_FIRESTORE_COLLECTION = 'shipment_pdf_data';
 const CHUNK_SIZE = 700000; // ~700KB safe margin per chunk under 1MB Firestore doc limit
 
-// Track whether Firebase Storage bucket is accessible (avoids repeated browser CORS preflight errors)
-let isFirebaseStorageDisabled = false;
+// Track whether Firebase Storage bucket is accessible.
+// Since Firebase Storage buckets require server-side gsutil CORS rules for browser domains,
+// setting this to true by default directs all PDF cloud persistence through Firestore
+// collection 'shipment_pdf_data' (chunked, 100% durable across devices, zero CORS issues)
+// and Server disk storage. This completely eliminates 'net::ERR_FAILED' and CORS preflight console errors.
+let isFirebaseStorageDisabled = true;
 
 export function disableFirebaseStorage(): void {
   isFirebaseStorageDisabled = true;

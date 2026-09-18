@@ -13,21 +13,32 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 function openPdfDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
-    if (typeof window === 'undefined' || !window.indexedDB) {
-      return reject(new Error('IndexedDB not supported'));
-    }
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
+    try {
+      if (typeof window === 'undefined' || !window.indexedDB) {
+        return reject(new Error('IndexedDB not supported'));
       }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => {
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        try {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME);
+          }
+        } catch (_) {}
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        dbPromise = null;
+        reject(request.error || new Error('IndexedDB open error'));
+      };
+      request.onblocked = () => {
+        dbPromise = null;
+        reject(new Error('IndexedDB open blocked'));
+      };
+    } catch (err) {
       dbPromise = null;
-      reject(request.error);
-    };
+      reject(err instanceof Error ? err : new Error(String(err) || 'IndexedDB initialization failed'));
+    }
   });
   return dbPromise;
 }

@@ -1217,14 +1217,14 @@ export const ShipmentProgressReport: React.FC<ShipmentProgressReportProps> = ({
               .filter((s) => s.status !== 'Completed')
               .sort((a, b) => (b.isUrgent ? 1 : 0) - (a.isUrgent ? 1 : 0))
               .slice(0, 6)
-              .map((s) => {
+              .map((s, idx) => {
                 const completedTasks = s.tasks.filter((t) => t.status === 'Completed').length;
                 const totalTasks = s.tasks.length;
                 const currentTask = s.tasks.find((t) => t.status === 'In Progress') || s.tasks.find((t) => t.status === 'Todo');
 
                 return (
                   <div
-                    key={s.id}
+                    key={`${s.id}-${idx}`}
                     onClick={() => onSelectShipment && onSelectShipment(s)}
                     className="p-2.5 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/20 transition-all cursor-pointer flex items-center justify-between gap-2"
                   >

@@ -24,10 +24,16 @@ initWorker();
 
 export function getPdfLoadOptions(data: Uint8Array | ArrayBuffer) {
   const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const origin =
+    typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : '';
+
   return {
     data: uint8,
-    cMapUrl: '/cmaps/',
+    cMapUrl: origin ? `${origin}/cmaps/` : '/cmaps/',
     cMapPacked: true,
+    wasmUrl: origin ? `${origin}/wasm/` : '/wasm/',
     standardFontDataUrl: `https://unpkg.com/pdfjs-dist@${pdfjsLib.version || '6.2.108'}/standard_fonts/`,
   };
 }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Mail, Copy, Check, X, Send, FileText, ExternalLink, Settings } from 'lucide-react';
 import { Shipment } from '../types';
-import { getCurrentUser } from '../lib/storageManager';
+import { getCurrentUser, addCustomsEmailLog } from '../lib/storageManager';
 import { useAuth } from '../lib/AuthContext';
 
 type MailerType = 'default' | 'gmail' | 'outlook';
@@ -41,6 +41,7 @@ export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
   const defaultCcAddresses = [
     'osasales3@tac-japan.co.jp',
     'osasales2@tac-japan.co.jp',
+    'tac-hellmann@tac-japan.co.jp',
     'kita@tac-japan.co.jp',
   ].filter((email) => {
     if (!currentUser) return true;
@@ -114,7 +115,7 @@ export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
     }
 
     // 3. AWB番号
-    const awbNo = shipment.primaryKey || shipment.mawbNumber || shipment.hawbNumber || '131-25931791';
+    const awbNo = (shipment as any).primaryKey || shipment.mawbNumber || shipment.hawbNumber || shipment.id || '131-25931791';
 
     // 4. 積地
     let polStr = shipment.portOfLoading || 'HND';
@@ -245,6 +246,28 @@ ${userName}`;
   };
 
   const handleOpenMailer = () => {
+    // Record outgoing email log to storage
+    if (shipment) {
+      addCustomsEmailLog({
+        shipmentId: shipment.id,
+        mawbNumber: shipment.mawbNumber,
+        hawbNumber: shipment.hawbNumber || undefined,
+        threadId: `thread_${shipment.mawbNumber || shipment.id}`,
+        direction: 'OUTGOING',
+        type: 'CUSTOMS_REQUEST',
+        status: 'SENT',
+        sentOrReceivedAt: new Date().toISOString(),
+        sender: {
+          name: `${loggedInUserName} (通関チーム)`,
+          email: currentUser?.email || 'tsukan@customs.logistics.co.jp',
+        },
+        toRecipients: toAddress.split(';').map((e) => e.trim()).filter(Boolean),
+        ccRecipients: ccAddress.split(';').map((e) => e.trim()).filter(Boolean),
+        subject,
+        body,
+      });
+    }
+
     const encTo = encodeURIComponent(toAddress.trim());
     const encCc = encodeURIComponent(ccAddress.trim());
     const encSubject = encodeURIComponent(subject);
@@ -274,7 +297,7 @@ ${userName}`;
             <div>
               <h3 className="text-base font-bold text-white">通関依頼メール作成</h3>
               <p className="text-xs text-slate-400">
-                AWB: <span className="font-mono text-blue-300 font-bold">{shipment.primaryKey}</span> の通関依頼メール下書き
+                AWB: <span className="font-mono text-blue-300 font-bold">{(shipment as any).primaryKey || shipment.id}</span> の通関依頼メール下書き
               </p>
             </div>
           </div>
@@ -356,7 +379,7 @@ ${userName}`;
               type="text"
               value={ccAddress}
               onChange={(e) => setCcAddress(e.target.value)}
-              placeholder="osasales3@tac-japan.co.jp; osasales2@tac-japan.co.jp"
+              placeholder="osasales3@tac-japan.co.jp; osasales2@tac-japan.co.jp; tac-hellmann@tac-japan.co.jp"
               className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm font-mono text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>

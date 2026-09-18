@@ -226,7 +226,7 @@ export const PdfCanvasViewer: React.FC<PdfCanvasViewerProps> = ({
             intent: 'display',
           };
 
-          const renderTask = page.render(renderContext);
+          const renderTask = page.render(renderContext as any);
           activeRenderTasks.push(renderTask);
 
           await renderTask.promise;
@@ -357,6 +357,26 @@ export const PdfCanvasViewer: React.FC<PdfCanvasViewerProps> = ({
           </div>
           <div className="text-xs font-bold text-slate-200">PDF指示書ドキュメント</div>
           <div className="text-[10px] text-slate-400">クリックしてインタラクティブプレビューを表示</div>
+        </div>
+      );
+    }
+
+    const isValidIframeUrl =
+      pdfDataUrl &&
+      (pdfDataUrl.startsWith('data:') ||
+        pdfDataUrl.startsWith('blob:') ||
+        pdfDataUrl.startsWith('http://') ||
+        pdfDataUrl.startsWith('https://') ||
+        pdfDataUrl.startsWith('/pdfs/'));
+
+    if (!isValidIframeUrl) {
+      return (
+        <div className={`w-full h-[650px] bg-slate-900 rounded-2xl flex flex-col items-center justify-center p-6 text-slate-400 border border-slate-800 ${className}`}>
+          <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mb-3 text-slate-400">
+            PDF
+          </div>
+          <p className="font-semibold text-slate-300 text-sm mb-1">PDFプレビューが表示できません</p>
+          <p className="text-xs text-slate-500 text-center max-w-sm">有効なPDFデータが読み込まれていないか、サーバー上にPDFファイルが存在しません。</p>
         </div>
       );
     }
@@ -697,7 +717,9 @@ export const PdfCanvasViewer: React.FC<PdfCanvasViewerProps> = ({
             >
               {/* PDF Render Canvas */}
               <canvas
-                ref={(el) => (canvasRefs.current[idx] = el)}
+                ref={(el) => {
+                  canvasRefs.current[idx] = el;
+                }}
                 className="block max-w-none"
                 style={dim ? { width: `${dim.width}px`, height: `${dim.height}px` } : undefined}
               />

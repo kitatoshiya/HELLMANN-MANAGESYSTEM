@@ -24,6 +24,7 @@ import {
   Check,
   Clock,
   Circle,
+  LayoutDashboard,
 } from 'lucide-react';
 
 interface PdfZoomModalProps {
@@ -33,6 +34,7 @@ interface PdfZoomModalProps {
   onShipmentUpdated?: (updated: Shipment) => void;
   shipments?: Shipment[];
   onNavigateShipment?: (nextShipment: Shipment) => void;
+  onReturnToDashboard?: () => void;
 }
 
 export const PdfZoomModal: React.FC<PdfZoomModalProps> = ({
@@ -42,6 +44,7 @@ export const PdfZoomModal: React.FC<PdfZoomModalProps> = ({
   onShipmentUpdated,
   shipments: propsShipments,
   onNavigateShipment,
+  onReturnToDashboard,
 }) => {
   const [shipment, setShipment] = useState<Shipment | null>(initialShipment);
   const [scale, setScale] = useState<number>(1);
@@ -317,6 +320,19 @@ export const PdfZoomModal: React.FC<PdfZoomModalProps> = ({
       <div className="bg-slate-900 border-b border-slate-800 text-white px-6 py-3 flex flex-wrap items-center justify-between gap-4 shrink-0 shadow-lg">
         {/* Document Meta Info & Shipment Summary */}
         <div className="flex items-center flex-wrap gap-4">
+          <button
+            type="button"
+            onClick={() => {
+              if (onReturnToDashboard) onReturnToDashboard();
+              onClose();
+            }}
+            className="px-3 py-1.5 text-xs font-bold text-slate-200 bg-slate-800/90 hover:bg-slate-700 hover:text-white rounded-xl border border-slate-700/90 shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer active:scale-95 shrink-0"
+            title="PDF全面プレビューを閉じてダッシュボード画面（案件一覧）に戻る"
+          >
+            <LayoutDashboard className="w-4 h-4 text-blue-400" />
+            <span>ダッシュボードに戻る</span>
+          </button>
+
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-blue-600/30 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold shrink-0">
               <FileText className="w-5 h-5" />
@@ -400,14 +416,14 @@ export const PdfZoomModal: React.FC<PdfZoomModalProps> = ({
             <div className="flex items-center space-x-1">
               <span className="text-[10px] text-slate-400 font-medium">個数:</span>
               <span className="font-bold text-indigo-300 font-mono">
-                {shipment.pieces || (shipment.pkgCount ? `${shipment.pkgCount}個` : '-')}
+                {shipment.pieces || ((shipment as any).pkgCount ? `${(shipment as any).pkgCount}個` : '-')}
               </span>
             </div>
             <div className="h-3 w-[1px] bg-slate-700" />
             <div className="flex items-center space-x-1">
               <span className="text-[10px] text-slate-400 font-medium">重量:</span>
               <span className="font-bold text-indigo-300 font-mono">
-                {shipment.grossWeight || (shipment.weight ? `${shipment.weight}kg` : '-')}
+                {shipment.grossWeight || ((shipment as any).weight ? `${(shipment as any).weight}kg` : '-')}
               </span>
             </div>
           </div>
@@ -514,6 +530,19 @@ export const PdfZoomModal: React.FC<PdfZoomModalProps> = ({
             >
               Shift+C
             </kbd>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (onReturnToDashboard) onReturnToDashboard();
+              onClose();
+            }}
+            className="flex items-center space-x-1.5 text-xs font-bold px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 active:scale-95 text-white border border-blue-400/40 shadow-md hover:shadow-blue-500/30 transition-all cursor-pointer"
+            title="PDFプレビューを終了して直接ダッシュボード（案件一覧）に戻る"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            <span>ダッシュボードに戻る</span>
           </button>
 
           <button

@@ -2,15 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../lib/AuthContext';
 import { OperatorMasterModal } from './OperatorMasterModal';
 import { TaskMasterModal } from './TaskMasterModal';
+import { SignatureSettingsModal } from './SignatureSettingsModal';
+import { ReplyTemplateSettingsModal } from './ReplyTemplateSettingsModal';
 import { getNotificationSettings, subscribeToNotificationSettings } from '../lib/notificationService';
 import { subscribeToSyncStatus, flushPendingSyncQueue } from '../lib/storageManager';
+import {
+  subscribeM365Store,
+  getUnifiedMailMessages,
+  subscribeM365SyncTimerState,
+  M365SyncTimerState,
+  getM365Settings,
+} from '../lib/m365EmailService';
 import { CloudSyncStatus } from '../types';
 import {
   FileUp,
   ShieldCheck,
   FileText,
   ChevronDown,
-  RefreshCw,
   Calendar,
   LogOut,
   Users,
@@ -29,6 +37,7 @@ import {
   CloudCheck,
   CloudAlert,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 
 const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'];
@@ -36,35 +45,48 @@ const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'];
 interface NavbarProps {
   onOpenUpload: () => void;
   onOpenSpecs: () => void;
-  onResetDemo: () => void;
   onSelectToday?: () => void;
   onOpenXrayAnalysis?: () => void;
   onOpenReport?: () => void;
   onOpenBackup?: () => void;
   onOpenNotificationSettings?: () => void;
+  onOpenM365Settings?: () => void;
   onShowSplash?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   onOpenUpload,
   onOpenSpecs,
-  onResetDemo,
   onSelectToday,
   onOpenXrayAnalysis,
   onOpenReport,
   onOpenBackup,
   onOpenNotificationSettings,
+  onOpenM365Settings,
   onShowSplash,
 }) => {
   const { currentOperator, currentUser, firebaseUser, logout, refreshOperator } = useAuth();
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [showOperatorMasterModal, setShowOperatorMasterModal] = useState(false);
   const [showTaskMasterModal, setShowTaskMasterModal] = useState(false);
+  const [showSignatureModal, setShowSignatureModal] = useState(false);
+  const [showReplyTemplateModal, setShowReplyTemplateModal] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState(getNotificationSettings());
   const [syncStatus, setSyncStatus] = useState<CloudSyncStatus>({
     state: 'synced',
     lastSyncedAt: Date.now(),
     pendingCount: 0,
+  });
+  const [pendingMailCount, setPendingMailCount] = useState<number>(0);
+  const [m365Settings, setM365Settings] = useState(getM365Settings());
+  const [syncTimerState, setSyncTimerState] = useState<M365SyncTimerState>({
+    lastSyncTime: null,
+    lastInboxSyncTime: null,
+    lastSentSyncTime: null,
+    isInboxSyncing: false,
+    isSentSyncing: false,
+    nextInboxSyncRemainingSec: 120,
+    nextSentSyncRemainingSec: 300,
   });
 
   useEffect(() => {
@@ -74,9 +96,27 @@ export const Navbar: React.FC<NavbarProps> = ({
     const unsubSync = subscribeToSyncStatus((status) => {
       setSyncStatus(status);
     });
+    
+    // Track pending decision emails count and settings
+    const updateMailCount = () => {
+      const allMails = getUnifiedMailMessages();
+      const pending = allMails.filter((m) => m.decisionStatus === 'PENDING_DECISION').length;
+      setPendingMailCount(pending);
+      setM365Settings(getM365Settings());
+    };
+    updateMailCount();
+    const unsubM365 = subscribeM365Store(updateMailCount);
+
+    // Track M365 background auto sync timer state (10-second tick updates)
+    const unsubTimerState = subscribeM365SyncTimerState((state) => {
+      setSyncTimerState(state);
+    });
+
     return () => {
       unsubNotify();
       unsubSync();
+      unsubM365();
+      unsubTimerState();
     };
   }, []);
 
@@ -92,24 +132,57 @@ export const Navbar: React.FC<NavbarProps> = ({
     await logout();
   };
 
+  // Format last sync time to hh:mm
+  const formatSyncTime = (isoString: string | null) => {
+    if (!isoString) return '--:--';
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '--:--';
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  };
+
+  // Format remaining seconds into clean label (e.g. "2分後" or "40秒後" or "1分20秒後")
+  const formatRemainingTime = (sec: number) => {
+    const s = Math.max(0, sec);
+    const m = Math.floor(s / 60);
+    const remainderSec = s % 60;
+    if (m === 0) return `${remainderSec}秒後`;
+    if (remainderSec === 0) return `${m}分後`;
+    return `${m}分${remainderSec}秒後`;
+  };
+
+  const isSyncingAny = syncTimerState.isInboxSyncing || syncTimerState.isSentSyncing;
+  const syncingLabel =
+    syncTimerState.isInboxSyncing && syncTimerState.isSentSyncing
+      ? 'メール送受信 同期中...'
+      : syncTimerState.isInboxSyncing
+      ? '受信メール同期中...'
+      : syncTimerState.isSentSyncing
+      ? '送信メール同期中...'
+      : 'メール同期中...';
+
+  // Earliest next sync between inbox and sent
+  const minRemainingSec = Math.min(
+    syncTimerState.nextInboxSyncRemainingSec,
+    syncTimerState.nextSentSyncRemainingSec
+  );
+
   return (
     <>
       <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 shadow-md">
         <div className="w-full max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo & System Title */}
-            <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-3.5">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-lg shadow-blue-500/20 shrink-0">
                 <FileText className="w-6 h-6" />
               </div>
               <div>
-                <div className="flex items-center space-x-2">
-                  <h1 className="text-lg font-bold tracking-tight text-white">輸出進捗管理システム</h1>
-                  <span className="px-2 py-0.5 text-xs font-semibold rounded bg-blue-900/60 text-blue-300 border border-blue-700/50 hidden sm:inline-block">
-                    Export Workflows
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 hidden sm:block">SI (PDF) 自動データ抽出 & リアルタイム進捗追跡</p>
+                <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white leading-tight">
+                  輸出進捗管理システム
+                </h1>
+                <p className="text-xs text-slate-400 hidden sm:block mt-0.5">SI (PDF) 自動データ抽出 & リアルタイム進捗追跡</p>
               </div>
             </div>
 
@@ -126,17 +199,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <div className="text-xs font-extrabold text-white">
                   本日: {todayFormattedStr}
                 </div>
-              </button>
-
-              {/* Reset Demo Data Button */}
-              <button
-                type="button"
-                onClick={onResetDemo}
-                title="データを初期状態にリセット"
-                className="hidden lg:inline-flex items-center px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5 mr-1.5 text-slate-400" />
-                データリセット
               </button>
 
               {/* Cloud Sync Status Indicator */}
@@ -172,15 +234,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 )}
               </div>
 
-              {/* Architecture Specs Modal Trigger */}
-              <button
-                type="button"
-                onClick={onOpenSpecs}
-                className="hidden sm:inline-flex items-center px-3 py-1.5 text-xs font-medium text-amber-300 bg-amber-950/40 hover:bg-amber-900/60 border border-amber-800/60 rounded-lg transition-colors cursor-pointer"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 mr-1.5 text-amber-400" />
-                仕様書
-              </button>
+              {/* Architecture Specs Modal moved to user menu */}
 
               {/* X-ray Inspection PDF OCR Analysis Button */}
               {onOpenXrayAnalysis && (
@@ -239,6 +293,62 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <span className="w-2 h-2 rounded-full bg-emerald-400 absolute top-1 right-1"></span>
                   )}
                 </button>
+              )}
+
+              {/* M365 Email Integration Button & Sync Status Badge */}
+              {onOpenM365Settings && (
+                <div className="flex items-center space-x-1.5">
+                  {/* Compact Auto Sync Status Badge (10-second tick updates) */}
+                  {m365Settings.enabled && (
+                    <div
+                      className={`hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono transition-all select-none ${
+                        isSyncingAny
+                          ? 'bg-emerald-950/80 border-emerald-500 text-emerald-300 shadow-sm shadow-emerald-900/50'
+                          : 'bg-slate-800/90 border-slate-700 text-slate-300'
+                      }`}
+                      title={
+                        isSyncingAny
+                          ? syncingLabel
+                          : `最終同期: ${formatSyncTime(syncTimerState.lastSyncTime)} (次回受信チェック: ${formatRemainingTime(
+                              syncTimerState.nextInboxSyncRemainingSec
+                            )}, 送信チェック: ${formatRemainingTime(syncTimerState.nextSentSyncRemainingSec)})`
+                      }
+                    >
+                      {isSyncingAny ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400 shrink-0" />
+                          <span className="font-bold text-emerald-300 animate-pulse font-sans">
+                            {syncingLabel}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse"></span>
+                          <span className="text-slate-400 font-sans">最終同期:</span>
+                          <span className="text-white font-bold">{formatSyncTime(syncTimerState.lastSyncTime)}</span>
+                          <span className="text-slate-500 font-sans text-[11px]">
+                            (次回 {formatRemainingTime(minRemainingSec)})
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onOpenM365Settings}
+                    title="Microsoft 365 共通メールハブ（メール送受信・案件決定）を開く"
+                    className="relative inline-flex items-center px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg shadow-sm transition-all transform active:scale-95 cursor-pointer"
+                  >
+                    <Mail className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
+                    <span className="hidden sm:inline">M365メール連携</span>
+                    {pendingMailCount > 0 && (
+                      <span className="ml-1.5 px-1.5 py-0.2 bg-amber-500 text-slate-950 font-bold text-[10px] rounded-full shadow-sm">
+                        {pendingMailCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
               )}
 
               {/* SI Upload Button */}
@@ -336,6 +446,42 @@ export const Navbar: React.FC<NavbarProps> = ({
                         </span>
                       </button>
 
+                      {/* Email Signature Settings Trigger */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowUserDropdown(false);
+                          setShowSignatureModal(true);
+                        }}
+                        className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white hover:bg-slate-800 rounded-xl transition-colors flex items-center justify-between cursor-pointer"
+                      >
+                        <div className="flex items-center space-x-2">
+                          <Mail className="w-4 h-4 text-purple-400" />
+                          <span>メール署名・シグニチャー設定</span>
+                        </div>
+                        <span className="text-[9px] bg-purple-900/60 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded font-mono">
+                          Signature
+                        </span>
+                      </button>
+
+                      {/* Reply Templates Master Trigger */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowUserDropdown(false);
+                          setShowReplyTemplateModal(true);
+                        }}
+                        className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white hover:bg-slate-800 rounded-xl transition-colors flex items-center justify-between cursor-pointer"
+                      >
+                        <div className="flex items-center space-x-2">
+                          <FileText className="w-4 h-4 text-emerald-400" />
+                          <span>返信・全員返信 業務定型文マスタ</span>
+                        </div>
+                        <span className="text-[9px] bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 px-1.5 py-0.5 rounded font-mono">
+                          Templates
+                        </span>
+                      </button>
+
                       {/* Notification & Cut-Off Alert Settings */}
                       {onOpenNotificationSettings && (
                         <button
@@ -413,6 +559,26 @@ export const Navbar: React.FC<NavbarProps> = ({
                         </span>
                       </a>
 
+                      {/* Architecture Specs Modal Trigger (Moved from navbar) */}
+                      {onOpenSpecs && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowUserDropdown(false);
+                            onOpenSpecs();
+                          }}
+                          className="w-full text-left px-3 py-2 text-xs font-semibold text-amber-300 hover:text-white hover:bg-amber-950/40 rounded-xl transition-colors flex items-center justify-between cursor-pointer border border-amber-900/30"
+                        >
+                          <div className="flex items-center space-x-2">
+                            <ShieldCheck className="w-4 h-4 text-amber-400" />
+                            <span>システム仕様書・設計書</span>
+                          </div>
+                          <span className="text-[9px] bg-amber-900/60 text-amber-300 border border-amber-700/50 px-1.5 py-0.5 rounded font-mono">
+                            Specs
+                          </span>
+                        </button>
+                      )}
+
                       {/* Logoff Button */}
                       <button
                         type="button"
@@ -442,6 +608,18 @@ export const Navbar: React.FC<NavbarProps> = ({
       <TaskMasterModal
         isOpen={showTaskMasterModal}
         onClose={() => setShowTaskMasterModal(false)}
+      />
+
+      {/* Signature Settings Modal */}
+      <SignatureSettingsModal
+        isOpen={showSignatureModal}
+        onClose={() => setShowSignatureModal(false)}
+      />
+
+      {/* Reply Template Settings Modal */}
+      <ReplyTemplateSettingsModal
+        isOpen={showReplyTemplateModal}
+        onClose={() => setShowReplyTemplateModal(false)}
       />
     </>
   );

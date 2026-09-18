@@ -46,13 +46,13 @@ export const DEFAULT_BILLING_PRESETS: BillingPresetPattern[] = [
   },
 ];
 
-// Default initial billing items if a shipment doesn't have any
+// Default initial billing items if a shipment doesn't have any (Amounts are blank by default for first-time display)
 export const DEFAULT_INITIAL_BILLING_ITEMS: BillingItem[] = [
-  { id: 'item_1', taxable: true, name: '輸出通関料', amount: 11800 },
-  { id: 'item_2', taxable: true, name: '取扱料 (Handling)', amount: 5000 },
-  { id: 'item_3', taxable: false, name: '上屋保管使用料', amount: 2400 },
-  { id: 'item_4', taxable: true, name: 'X線検査作業料', amount: 2000 },
-  { id: 'item_5', taxable: false, name: '時間外配送手配費', amount: '' }, // 手書き・翌日確定用空欄
+  { id: 'item_1', taxable: true, name: '輸出通関料', amount: '' },
+  { id: 'item_2', taxable: true, name: '取扱料 (Handling)', amount: '' },
+  { id: 'item_3', taxable: false, name: '上屋保管使用料', amount: '' },
+  { id: 'item_4', taxable: true, name: 'X線検査作業料', amount: '' },
+  { id: 'item_5', taxable: false, name: '時間外配送手配費', amount: '' },
 ];
 
 /**
@@ -103,15 +103,16 @@ export function getDefaultBillingPreset(): BillingPresetPattern {
 
 /**
  * Get initial billing items converted from the default preset pattern
+ * Note: Initial display amounts are blank ('') as requested by user.
  */
-export function getDefaultBillingItems(): BillingItem[] {
+export function getDefaultBillingItems(blankAmounts: boolean = true): BillingItem[] {
   const preset = getDefaultBillingPreset();
   if (preset && Array.isArray(preset.items) && preset.items.length > 0) {
     return preset.items.map((it, idx) => ({
       id: `item_${Date.now()}_${idx}`,
       taxable: it.taxable,
       name: it.name,
-      amount: it.amount,
+      amount: blankAmounts ? '' : it.amount,
     }));
   }
   return DEFAULT_INITIAL_BILLING_ITEMS;
@@ -194,9 +195,17 @@ export function calculateBillingTotals(items: BillingItem[]): BillingCalculation
 
 // Timeout wrapper for non-blocking Firestore calls
 function withTimeout<T>(promise: Promise<T>, ms = 2500): Promise<T> {
+  let timer: any = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('Firestore timeout'));
+    }, ms);
+  });
   return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), ms)),
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    timeoutPromise,
   ]);
 }
 

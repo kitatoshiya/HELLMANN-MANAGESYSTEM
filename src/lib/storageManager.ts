@@ -1,4 +1,4 @@
-import { Shipment, Task, ActivityLog, User, ShipmentStatus, TaskStatus, Operator, ShipmentComment, MilestoneKey, MilestoneState, CloudSyncStatus } from '../types';
+import { Shipment, Task, ActivityLog, User, ShipmentStatus, TaskStatus, Operator, ShipmentComment, MilestoneKey, MilestoneState, CloudSyncStatus, CustomsEmailLog, CustomsQaItem } from '../types';
 import { INITIAL_SHIPMENTS, INITIAL_LOGS } from './sampleData';
 import { generatePdfDataUrlFromShipment } from './pdfGenerator';
 import { savePdfToStorage, getPdfFromStorageSync, getPdfFromStorageAsync, getShipmentPdfAsync, rekeyPdfStorage, deletePdfFromStorage } from './pdfStorageService';
@@ -187,6 +187,23 @@ export function prepareShipmentForFirestore(s: Shipment): Record<string, any> {
   return copy;
 }
 
+/**
+ * Deduplicate shipments by id to prevent duplicate keys and state synchronization issues
+ */
+export function deduplicateShipments(shipments: Shipment[]): Shipment[] {
+  if (!Array.isArray(shipments)) return [];
+  const seen = new Set<string>();
+  const result: Shipment[] = [];
+  for (const s of shipments) {
+    if (!s || !s.id) continue;
+    if (!seen.has(s.id)) {
+      seen.add(s.id);
+      result.push(s);
+    }
+  }
+  return result;
+}
+
 export function initializeFirebaseStorage() {
   if (isFirebaseInitialized) return;
   isFirebaseInitialized = true;
@@ -194,8 +211,9 @@ export function initializeFirebaseStorage() {
   // Try flushing any unsynced offline items on startup
   flushPendingSyncQueue().catch(() => {});
 
-  onSnapshot(collection(db, 'shipments'), (snapshot) => {
-    if (snapshot.docs.length === 0 && !hasSeededShipments) {
+  try {
+    onSnapshot(collection(db, 'shipments'), (snapshot) => {
+      if (snapshot.docs.length === 0 && !hasSeededShipments) {
       hasSeededShipments = true;
       const saved = localStorage.getItem(STORAGE_KEYS.SHIPMENTS);
       let localData: Shipment[] = [];
@@ -232,24 +250,75 @@ export function initializeFirebaseStorage() {
     const localMap = new Map<string, Shipment>();
     localList.forEach(s => localMap.set(s.id, s));
 
-    // Smart merge: if local copy has newer updates (by updatedAt) or is in sync queue, preserve local version
+    const nowMs = Date.now();
     let needsReSync = false;
+    const reSyncShipmentIds: string[] = [];
+
+    // Smart merge: fine-grained task-level merge, timestamp comparison, and mutation protection
     const mergedShipments = remoteShipments.map(remoteItem => {
       const localItem = localMap.get(remoteItem.id);
       if (!localItem) return remoteItem;
 
+      const remoteFingerprint = computeShipmentFingerprint(remoteItem);
+      const localFingerprint = computeShipmentFingerprint(localItem);
+
+      // If remote already matches local state exactly, clean up dirty state and return remoteItem
+      if (remoteFingerprint === localFingerprint) {
+        pendingDirtyShipmentIds.delete(remoteItem.id);
+        committedShipmentSnapshots.set(remoteItem.id, remoteFingerprint);
+        return remoteItem;
+      }
+
+      const isQueued = Boolean(queue[localItem.id]);
+      const isDirty = pendingDirtyShipmentIds.has(localItem.id);
+      const lastLocalMutation = recentLocalMutations.get(localItem.id) || 0;
+      const isRecentlyLocallyMutated = (nowMs - lastLocalMutation) < LOCAL_MUTATION_PROTECTION_MS;
+
       const remoteTime = new Date(remoteItem.updatedAt || remoteItem.createdAt || 0).getTime();
       const localTime = new Date(localItem.updatedAt || localItem.createdAt || 0).getTime();
 
-      // If local item is in queue or locally updated more recently than remote, keep local version
-      if (queue[localItem.id] || localTime > remoteTime) {
-        // Also ensure billing items and status are preserved from local
-        if (localItem.billingInitialized && !remoteItem.billingInitialized) {
-          remoteItem.billingInitialized = true;
-          remoteItem.billingItems = localItem.billingItems;
+      // Deep task-level merge to prevent task rollback or lost updates
+      const { tasks: mergedTasks, hasLocalAdvance: taskLocalAdvance } = mergeShipmentTasks(
+        localItem.tasks || [],
+        remoteItem.tasks || []
+      );
+      const { milestones: mergedMilestones, hasLocalAdvance: milestoneLocalAdvance } = mergeShipmentMilestones(
+        localItem.milestones || [],
+        remoteItem.milestones || []
+      );
+      const computedShipmentStatus = calculateShipmentStatus(mergedTasks);
+
+      // Protect local changes from rollback: keep merged state in UI memory/cache
+      if (isQueued || isDirty || isRecentlyLocallyMutated || localTime > remoteTime || taskLocalAdvance || milestoneLocalAdvance) {
+        const mergedItem: Shipment = {
+          ...remoteItem,
+          ...localItem,
+          tasks: mergedTasks,
+          milestones: mergedMilestones,
+          status: computedShipmentStatus,
+          updatedAt: localItem.updatedAt || remoteItem.updatedAt || new Date().toISOString(),
+          billingInitialized: localItem.billingInitialized || remoteItem.billingInitialized,
+          billingItems: (localItem.billingItems && localItem.billingItems.length > 0)
+            ? localItem.billingItems
+            : remoteItem.billingItems,
+        };
+
+        // Only schedule resync if the item is in the offline queue (not yet delivered to Firestore)
+        if (isQueued) {
+          needsReSync = true;
+          reSyncShipmentIds.push(localItem.id);
         }
-        needsReSync = true;
-        return ensureShipmentPdf(localItem);
+
+        return ensureShipmentPdf(mergedItem);
+      }
+
+      // Even if remote wins overall, apply merged tasks & milestones if remote doesn't have newer changes
+      if (remoteItem.tasks && remoteItem.tasks.length > 0) {
+        remoteItem.tasks = mergedTasks;
+        remoteItem.status = calculateShipmentStatus(mergedTasks);
+      }
+      if (remoteItem.milestones && remoteItem.milestones.length > 0) {
+        remoteItem.milestones = mergedMilestones;
       }
 
       // If remote has no billingItems but local does, preserve local billingItems
@@ -261,16 +330,21 @@ export function initializeFirebaseStorage() {
       return remoteItem;
     });
 
-    // Also include any purely local items that are in sync queue and not yet on remote
+    // Also include any purely local items that are in sync queue or dirty and not yet on remote
     const remoteIdSet = new Set(remoteShipments.map(s => s.id));
+    const mergedIdSet = new Set(mergedShipments.map(s => s.id));
     localList.forEach(localItem => {
-      if ((queue[localItem.id] || !remoteIdSet.has(localItem.id)) && !remoteIdSet.has(localItem.id)) {
+      if (!remoteIdSet.has(localItem.id) && !mergedIdSet.has(localItem.id)) {
         mergedShipments.unshift(ensureShipmentPdf(localItem));
-        needsReSync = true;
+        mergedIdSet.add(localItem.id);
+        if (queue[localItem.id] || pendingDirtyShipmentIds.has(localItem.id)) {
+          needsReSync = true;
+          reSyncShipmentIds.push(localItem.id);
+        }
       }
     });
 
-    cachedShipments = mergedShipments;
+    cachedShipments = deduplicateShipments(mergedShipments);
     
     // Record read metric
     if (snapshot.docs.length > 0) {
@@ -279,11 +353,13 @@ export function initializeFirebaseStorage() {
 
     hydrateShipmentPdfsAsync(cachedShipments);
     
-    // Seed committed snapshots for cleanly synchronized shipments to enable Diff Sync
+    // Seed committed snapshots for cleanly synchronized shipments to enable Diff Sync.
+    // NEVER overwrite snapshot or clear dirty flag if it is currently dirty, recently mutated, or in queue!
     remoteShipments.forEach((remoteItem) => {
-      if (!needsReSync || !queue[remoteItem.id]) {
+      const isDirty = pendingDirtyShipmentIds.has(remoteItem.id);
+      const isRecent = (nowMs - (recentLocalMutations.get(remoteItem.id) || 0)) < LOCAL_MUTATION_PROTECTION_MS;
+      if (!isDirty && !isRecent && !queue[remoteItem.id] && !reSyncShipmentIds.includes(remoteItem.id)) {
         committedShipmentSnapshots.set(remoteItem.id, computeShipmentFingerprint(remoteItem));
-        pendingDirtyShipmentIds.delete(remoteItem.id);
       }
     });
 
@@ -292,6 +368,19 @@ export function initializeFirebaseStorage() {
       localStorage.setItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
     } catch (e) {
       console.warn('[Storage] LocalStorage setItem failed:', e);
+    }
+
+    if (reSyncShipmentIds.length > 0) {
+      reSyncShipmentIds.forEach((id) => pendingDirtyShipmentIds.add(id));
+      // Schedule resync commit to push merged state back to Firestore
+      if (firestoreBatchTimeout) clearTimeout(firestoreBatchTimeout);
+      firestoreBatchTimeout = setTimeout(() => {
+        if (cachedShipments) {
+          commitShipmentsToFirestore(cachedShipments).catch((err) => {
+            console.warn('[Storage] Resync commit error:', err);
+          });
+        }
+      }, 400);
     }
 
     if (needsReSync) {
@@ -312,9 +401,13 @@ export function initializeFirebaseStorage() {
       errorMessage: 'クラウドサーバーとの通信が一時的に切断されています',
     });
   });
+  } catch (err) {
+    console.warn("Firestore shipments subscription init error:", err);
+  }
   
-  onSnapshot(collection(db, 'logs'), (snapshot) => {
-    if (snapshot.docs.length === 0 && !hasSeededLogs) {
+  try {
+    onSnapshot(collection(db, 'logs'), (snapshot) => {
+      if (snapshot.docs.length === 0 && !hasSeededLogs) {
       hasSeededLogs = true;
       const saved = localStorage.getItem(STORAGE_KEYS.LOGS);
       let localLogs: ActivityLog[] = [];
@@ -345,12 +438,16 @@ export function initializeFirebaseStorage() {
   }, (err) => {
     console.warn("Firestore logs subscription error:", err);
   });
+  } catch (err) {
+    console.warn("Firestore logs subscription init error:", err);
+  }
 }
 
 const STORAGE_KEYS = {
   SHIPMENTS: 'export_mgmt_shipments_v1',
   LOGS: 'export_mgmt_logs_v1',
   CURRENT_USER: 'export_mgmt_user_v1',
+  EMAIL_LOGS: 'export_mgmt_email_logs_v1',
 };
 
 // Event emitter for real-time reactivity
@@ -392,6 +489,26 @@ export function setCurrentUser(user: User): void {
 }
 
 // Get Shipments
+export function cleanCustomsQas(qas?: CustomsQaItem[]): CustomsQaItem[] {
+  if (!qas || !Array.isArray(qas)) return [];
+  return qas.filter((q) => {
+    const text = `${q.title || ''} ${q.brokerQuestion?.questionText || ''} ${q.hellmannAnswer?.answerText || ''}`;
+    if (
+      text.includes('成田通関の高橋です') ||
+      text.includes('外為法に基づく該非判定書') ||
+      text.includes('渡辺です') ||
+      text.includes('小林です') ||
+      text.includes('精密測定機器が含まれております') ||
+      text.includes('HSコード分類・原料構成比率の確認') ||
+      text.includes('brk_mail_') ||
+      q.id?.startsWith('qa_demo_')
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export function getShipments(): Shipment[] {
   if (!isFirebaseInitialized) initializeFirebaseStorage();
   if (cachedShipments !== null) {
@@ -402,14 +519,29 @@ export function getShipments(): Shipment[] {
   let shipments: Shipment[] = [];
   if (saved) {
     try {
-      shipments = JSON.parse(saved);
+      const rawList: Shipment[] = JSON.parse(saved);
+      shipments = rawList
+        .filter(
+          (s) =>
+            !s.id.startsWith('HAWB-8849') &&
+            !s.id.startsWith('999-8765') &&
+            s.id !== 'shipment_hlm_99218' &&
+            s.id !== 'shipment_hlm_fra_441'
+        )
+        .map((s) => ({
+          ...s,
+          customsQas: cleanCustomsQas(s.customsQas),
+        }));
+      if (shipments.length !== rawList.length || JSON.stringify(shipments) !== saved) {
+        localStorage.setItem(STORAGE_KEYS.SHIPMENTS, JSON.stringify(shipments));
+      }
     } catch {
-      shipments = INITIAL_SHIPMENTS;
+      shipments = [];
     }
   } else {
-    shipments = INITIAL_SHIPMENTS;
+    shipments = [];
   }
-  cachedShipments = shipments.map(s => ensureShipmentPdf(s));
+  cachedShipments = deduplicateShipments(shipments.map(s => ensureShipmentPdf(s)));
   hydrateShipmentPdfsAsync(cachedShipments);
   return cachedShipments;
 }
@@ -436,6 +568,7 @@ export function findExistingShipmentByKey(mawbNumber: string, hawbNumber?: strin
 }
 
 export async function saveSingleShipmentHelper(shipment: Shipment): Promise<boolean> {
+  recentLocalMutations.set(shipment.id, Date.now());
   try {
     const payload = prepareShipmentForFirestore(shipment);
     updateSyncStatus({ state: 'syncing' });
@@ -500,6 +633,181 @@ export function computeShipmentFingerprint(s: Shipment): string {
   const milestoneSummary = s.milestones ? JSON.stringify(s.milestones) : '';
 
   return `${s.id}#${s.updatedAt || ''}#${s.status}#${s.mawbNumber}#${s.hawbNumber || ''}#${s.assignedOperator?.id || ''}#${s.pieces || ''}#${s.grossWeight || ''}#${s.flightRoute || ''}#${s.customsClearanceDate || ''}#${s.cutTime || ''}#${s.shipper || ''}#${s.consignee || ''}#${s.billingInitialized ? '1' : '0'}#${billingSummary}#${tasksSummary}#${milestoneSummary}#${s.hasCustomPdf ? '1' : '0'}`;
+}
+
+// Maps shipmentId -> timestamp (Date.now()) of the most recent local mutation
+export const recentLocalMutations = new Map<string, number>();
+export const LOCAL_MUTATION_PROTECTION_MS = 8000; // Protect local changes for 8 seconds against stale snapshot overwrites
+
+/**
+ * Task-level fine-grained smart merge to prevent task rollback or lost updates
+ * during concurrent edits, snapshot delivery latency, or rapid multi-task completions.
+ */
+export function mergeShipmentTasks(
+  localTasks: Task[] = [],
+  remoteTasks: Task[] = []
+): { tasks: Task[]; hasLocalAdvance: boolean } {
+  if (!localTasks || localTasks.length === 0) {
+    return { tasks: remoteTasks || [], hasLocalAdvance: false };
+  }
+  if (!remoteTasks || remoteTasks.length === 0) {
+    return { tasks: localTasks, hasLocalAdvance: true };
+  }
+
+  const localMap = new Map<string, Task>();
+  localTasks.forEach((t) => localMap.set(t.id, t));
+
+  const remoteMap = new Map<string, Task>();
+  remoteTasks.forEach((t) => remoteMap.set(t.id, t));
+
+  let hasLocalAdvance = false;
+
+  // Use union of task IDs preserving existing order
+  const allIds: string[] = [];
+  remoteTasks.forEach((t) => {
+    if (!allIds.includes(t.id)) allIds.push(t.id);
+  });
+  localTasks.forEach((t) => {
+    if (!allIds.includes(t.id)) allIds.push(t.id);
+  });
+
+  const mergedTasks: Task[] = allIds.map((taskId) => {
+    const local = localMap.get(taskId);
+    const remote = remoteMap.get(taskId);
+
+    if (!remote && local) {
+      hasLocalAdvance = true;
+      return local;
+    }
+    if (!local && remote) {
+      return remote;
+    }
+    if (local && remote) {
+      const localUpdated = new Date(local.updatedAt || local.createdAt || 0).getTime();
+      const remoteUpdated = new Date(remote.updatedAt || remote.createdAt || 0).getTime();
+
+      // Rule 1: CRITICAL - Task completion protection
+      // If locally completed, NEVER roll back to 'Todo' or 'In Progress' unless remote was explicitly modified LATER than local completion
+      if (local.status === 'Completed' && remote.status !== 'Completed') {
+        if (localUpdated >= remoteUpdated || local.completedAt) {
+          hasLocalAdvance = true;
+          return {
+            ...remote,
+            status: 'Completed',
+            completedBy: local.completedBy || remote.completedBy,
+            completedAt: local.completedAt || remote.completedAt,
+            assignedTo: local.assignedTo || remote.assignedTo,
+            updatedAt: local.updatedAt,
+          };
+        }
+      }
+
+      // Rule 2: If remote is Completed and local is not:
+      if (remote.status === 'Completed' && local.status !== 'Completed') {
+        if (remoteUpdated >= localUpdated) {
+          return remote;
+        } else {
+          // Local was modified after remote completion (e.g. intentionally reopened)
+          hasLocalAdvance = true;
+          return local;
+        }
+      }
+
+      // Rule 3: Timestamp comparison
+      if (localUpdated > remoteUpdated) {
+        hasLocalAdvance = true;
+        return local;
+      } else if (remoteUpdated > localUpdated) {
+        return remote;
+      }
+
+      // Rule 4: Timestamps are identical or tie
+      if (local.status !== remote.status) {
+        if (local.status === 'Completed' || (local.status === 'In Progress' && remote.status === 'Todo')) {
+          hasLocalAdvance = true;
+          return local;
+        }
+        return remote;
+      }
+
+      // Prefer richer assignee or completion info
+      if (local.assignedTo && !remote.assignedTo) {
+        hasLocalAdvance = true;
+        return { ...remote, assignedTo: local.assignedTo };
+      }
+
+      return remote;
+    }
+    return remote || local!;
+  });
+
+  mergedTasks.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  return { tasks: mergedTasks, hasLocalAdvance };
+}
+
+/**
+ * Milestone-level fine-grained smart merge to prevent milestone completion rollback
+ */
+export function mergeShipmentMilestones(
+  localMilestones: MilestoneState[] = [],
+  remoteMilestones: MilestoneState[] = []
+): { milestones: MilestoneState[]; hasLocalAdvance: boolean } {
+  if (!localMilestones || localMilestones.length === 0) return { milestones: remoteMilestones || [], hasLocalAdvance: false };
+  if (!remoteMilestones || remoteMilestones.length === 0) return { milestones: localMilestones, hasLocalAdvance: true };
+
+  const localMap = new Map<MilestoneKey, MilestoneState>();
+  localMilestones.forEach((m) => localMap.set(m.key, m));
+
+  const remoteMap = new Map<MilestoneKey, MilestoneState>();
+  remoteMilestones.forEach((m) => remoteMap.set(m.key, m));
+
+  let hasLocalAdvance = false;
+  const allKeys: MilestoneKey[] = ['document_received', 'customs_cleared', 'customs_permit', 'onboarded'];
+
+  const merged = allKeys.map((key) => {
+    const local = localMap.get(key);
+    const remote = remoteMap.get(key);
+
+    if (local && !remote) {
+      if (local.completed) {
+        hasLocalAdvance = true;
+      }
+      return local;
+    }
+    if (!local && remote) return remote;
+    if (local && remote) {
+      const localUpdated = new Date(local.updatedAt || 0).getTime();
+      const remoteUpdated = new Date(remote.updatedAt || 0).getTime();
+
+      if (local.completed && !remote.completed) {
+        if (localUpdated >= remoteUpdated || local.completedAt) {
+          hasLocalAdvance = true;
+          return local;
+        }
+      }
+      if (remote.completed && !local.completed) {
+        if (remoteUpdated >= localUpdated) {
+          return remote;
+        }
+        hasLocalAdvance = true;
+        return local;
+      }
+      if (localUpdated > remoteUpdated) {
+        hasLocalAdvance = true;
+        return local;
+      }
+      return remote;
+    }
+    return {
+      key,
+      label: key,
+      completed: false,
+      completedAt: null,
+    };
+  });
+
+  return { milestones: merged, hasLocalAdvance };
 }
 
 const committedShipmentSnapshots = new Map<string, string>();
@@ -622,7 +930,10 @@ if (typeof window !== 'undefined') {
 }
 
 // Save Shipments with robust Diff Sync & QuotaExceededError protection
-export function saveShipmentsHelper(shipments: Shipment[], explicitDirtyIds?: string[]) {
+export function saveShipmentsHelper(rawShipments: Shipment[], explicitDirtyIds?: string[], immediate = false) {
+  const shipments = deduplicateShipments(rawShipments);
+  const nowMs = Date.now();
+
   // Track deleted shipments before updating cachedShipments
   if (cachedShipments) {
     const currentIds = new Set(shipments.map(s => s.id));
@@ -631,13 +942,17 @@ export function saveShipmentsHelper(shipments: Shipment[], explicitDirtyIds?: st
         pendingDeletedShipmentIds.add(s.id);
         pendingDirtyShipmentIds.delete(s.id);
         committedShipmentSnapshots.delete(s.id);
+        recentLocalMutations.delete(s.id);
       }
     });
   }
 
   // Explicitly marked dirty shipments
   if (explicitDirtyIds && explicitDirtyIds.length > 0) {
-    explicitDirtyIds.forEach((id) => pendingDirtyShipmentIds.add(id));
+    explicitDirtyIds.forEach((id) => {
+      pendingDirtyShipmentIds.add(id);
+      recentLocalMutations.set(id, nowMs);
+    });
   }
 
   // Automatically detect modified or added shipments against committed snapshots
@@ -646,11 +961,12 @@ export function saveShipmentsHelper(shipments: Shipment[], explicitDirtyIds?: st
     const prevFp = committedShipmentSnapshots.get(s.id);
     if (!prevFp || prevFp !== fp) {
       pendingDirtyShipmentIds.add(s.id);
+      recentLocalMutations.set(s.id, nowMs);
     }
   });
 
   // Local cache optimistic update
-  cachedShipments = [...shipments];
+  cachedShipments = deduplicateShipments(shipments);
   try {
     localStorage.setItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
   } catch (e) {
@@ -658,19 +974,35 @@ export function saveShipmentsHelper(shipments: Shipment[], explicitDirtyIds?: st
   }
   notifyListeners();
 
+  // If immediate commit requested, bypass debounce and push directly
+  if (immediate) {
+    if (firestoreBatchTimeout) {
+      clearTimeout(firestoreBatchTimeout);
+      firestoreBatchTimeout = null;
+    }
+    pendingBatchShipments = null;
+    commitShipmentsToFirestore(cachedShipments).catch((err) => {
+      console.warn('[Storage] Immediate commit error:', err);
+    });
+    return;
+  }
+
   // Debounced Diff Sync to Firestore to prevent write stream exhaustion
   pendingBatchShipments = shipments;
   if (firestoreBatchTimeout) clearTimeout(firestoreBatchTimeout);
   firestoreBatchTimeout = setTimeout(() => {
     if (pendingBatchShipments !== null) {
-      commitShipmentsToFirestore(pendingBatchShipments);
+      const toCommit = pendingBatchShipments;
       pendingBatchShipments = null;
+      commitShipmentsToFirestore(toCommit).catch((err) => {
+        console.warn('Firestore debounced commit error:', err);
+      });
     }
   }, 400);
 }
 
-function saveShipments(shipments: Shipment[]) {
-  saveShipmentsHelper(shipments);
+function saveShipments(shipments: Shipment[], explicitDirtyIds?: string[], immediate = false) {
+  saveShipmentsHelper(shipments, explicitDirtyIds, immediate);
 }
 
 // Get Activity Logs
@@ -744,6 +1076,336 @@ export function addActivityLog(
   return newLog;
 }
 
+// -------------------------------------------------------------
+// Customs Email Logs Management & Thread Resolution
+// -------------------------------------------------------------
+
+function cleanAwbKey(awb?: string | null): string {
+  if (!awb) return '';
+  return awb.replace(/[-\s]/g, '').toLowerCase().trim();
+}
+
+/**
+ * Generate default customs email logs for a shipment (Only OUTGOING customs request to broker)
+ */
+function createDefaultEmailLogsForShipment(s: Shipment): CustomsEmailLog[] {
+  const flight = (s.flightRoute || 'NH006').split('/')[0].trim();
+  const awb = s.mawbNumber || (s as any).primaryKey || s.hawbNumber || s.id;
+  const hawb = s.hawbNumber || s.id;
+  const createdDate = s.createdAt ? new Date(s.createdAt) : new Date();
+  const operatorName = s.assignedOperator?.name || '喜多';
+  const operatorEmail = s.assignedOperator?.email || 'kita@tac-japan.co.jp';
+
+  let dateStr = '9/14';
+  if (s.customsClearanceDate) {
+    const parts = s.customsClearanceDate.split('-');
+    if (parts.length >= 3) {
+      dateStr = `${parseInt(parts[1], 10)}/${parseInt(parts[2], 10)}`;
+    } else {
+      dateStr = s.customsClearanceDate.replace(/-/g, '/').slice(5);
+    }
+  }
+
+  const threadId = `thread_${cleanAwbKey(awb)}_${s.id}`;
+  const cutTimeStr = s.cutTime ? (s.cutTime.endsWith('カット') ? s.cutTime : `${s.cutTime}カット`) : '';
+
+  const outgoingCustomsMail: CustomsEmailLog = {
+    id: `email_customs_req_${s.id}`,
+    shipmentId: s.id,
+    mawbNumber: s.mawbNumber,
+    hawbNumber: s.hawbNumber || undefined,
+    threadId,
+    direction: 'OUTGOING',
+    type: 'CUSTOMS_REQUEST',
+    status: 'SENT',
+    sentOrReceivedAt: new Date(createdDate.getTime() + 15 * 60 * 1000).toISOString(),
+    sender: {
+      name: `${operatorName} (輸出通関チーム)`,
+      email: operatorEmail,
+    },
+    toRecipients: ['shirana@tac-japan.co.jp'],
+    ccRecipients: [
+      'osasales3@tac-japan.co.jp',
+      'osasales2@tac-japan.co.jp',
+      'tac-hellmann@tac-japan.co.jp',
+      'kita@tac-japan.co.jp',
+    ],
+    subject: `${dateStr} 輸出通関依頼 ${flight} ${awb} ヘルマンシップス ${cutTimeStr}`.trim(),
+    body: `白名様
+
+お疲れ様です。${operatorName}です。
+
+${dateStr} 輸出通関依頼 ${flight} ${awb} ヘルマンシップス ${cutTimeStr}
+
+${awb}
+${s.portOfLoading || 'HND'}-${s.destination || 'DEST'}
+${s.pieces || '-'} ${s.grossWeight || '-'}
+
+FLAG：${s.isImportant ? '重要・至急通関' : '通常'}
+
+下記PO NOをEDに記載お願いします。
+受注NO: ${s.orderNumber || '-'}
+INVOICE NO: ${s.invoiceNumber || '-'}
+
+以上、よろしくお願いいたします。
+
+${operatorName}`,
+    attachments: [
+      {
+        id: `att_si_forward_${s.id}`,
+        fileName: `SI_${hawb.replace(/[^a-zA-Z0-9_-]/g, '')}.pdf`,
+        contentType: 'application/pdf',
+        sizeBytes: 92160,
+        isPdf: true,
+      },
+    ],
+  };
+
+  return [outgoingCustomsMail];
+}
+
+/**
+ * Get all customs email logs from storage
+ */
+export function getEmailLogs(shipmentIdOrMawb?: string): CustomsEmailLog[] {
+  let allLogs: CustomsEmailLog[] = [];
+  const saved = localStorage.getItem(STORAGE_KEYS.EMAIL_LOGS);
+
+  if (saved) {
+    try {
+      allLogs = JSON.parse(saved);
+    } catch {
+      allLogs = [];
+    }
+  }
+
+  // Purge any old fabricated incoming order logs (email_hlm_order_*) from storage
+  const originalLength = allLogs.length;
+  allLogs = allLogs.filter((log) => !log.id.startsWith('email_hlm_order_') && log.type !== 'HELLMANN_ORDER');
+  let hasUpdated = allLogs.length !== originalLength;
+
+  // Ensure current shipments have outgoing email logs
+  const shipments = getShipments();
+
+  if (!allLogs || allLogs.length === 0) {
+    allLogs = [];
+    for (const s of shipments) {
+      const logs = createDefaultEmailLogsForShipment(s);
+      allLogs.push(...logs);
+    }
+    hasUpdated = true;
+  }
+
+  if (hasUpdated) {
+    try {
+      localStorage.setItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(allLogs));
+    } catch (e) {
+      console.warn('Failed to cache initial email logs:', e);
+    }
+  }
+
+  if (!shipmentIdOrMawb) {
+    return allLogs.sort(
+      (a, b) => new Date(b.sentOrReceivedAt).getTime() - new Date(a.sentOrReceivedAt).getTime()
+    );
+  }
+
+  const cleanTarget = cleanAwbKey(shipmentIdOrMawb);
+  const filtered = allLogs.filter((l) => {
+    if (l.shipmentId === shipmentIdOrMawb) return true;
+    if (cleanAwbKey(l.mawbNumber) === cleanTarget) return true;
+    if (cleanAwbKey(l.hawbNumber) === cleanTarget) return true;
+    if (cleanAwbKey(l.id) === cleanTarget) return true;
+    return false;
+  });
+
+  return filtered.sort(
+    (a, b) => new Date(a.sentOrReceivedAt).getTime() - new Date(b.sentOrReceivedAt).getTime()
+  );
+}
+
+/**
+ * Add a new Customs Email Log (e.g. from CustomsEmailModal or incoming sync)
+ */
+export function addCustomsEmailLog(
+  emailLog: Omit<CustomsEmailLog, 'id'> | CustomsEmailLog
+): CustomsEmailLog {
+  const allLogs = getEmailLogs();
+  const logWithId: CustomsEmailLog = {
+    ...emailLog,
+    id: 'id' in emailLog && emailLog.id ? emailLog.id : `mail_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+  };
+
+  const updatedLogs = [logWithId, ...allLogs.filter((l) => l.id !== logWithId.id)];
+  try {
+    localStorage.setItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(updatedLogs));
+  } catch (e) {
+    console.warn('Failed to save email log to storage:', e);
+  }
+
+  notifyListeners();
+  return logWithId;
+}
+
+/**
+ * Retrieve a unified email thread for a shipment (combining saved logs and customsQas)
+ */
+export function getCustomsEmailThreadForShipment(
+  shipmentOrTarget: Shipment | { id: string; mawbNumber?: string; hawbNumber?: string; primaryKey?: string; customsQas?: any[] } | string
+): CustomsEmailLog[] {
+  let shipment: any = null;
+  let targetId = '';
+  let targetMawb = '';
+  let targetHawb = '';
+
+  if (typeof shipmentOrTarget === 'string') {
+    targetId = shipmentOrTarget;
+    targetMawb = shipmentOrTarget;
+    shipment = getShipmentById(shipmentOrTarget);
+    if (!shipment) {
+      const all = getShipments();
+      const clean = cleanAwbKey(shipmentOrTarget);
+      shipment = all.find((s) => cleanAwbKey(s.mawbNumber) === clean || cleanAwbKey(s.hawbNumber) === clean || cleanAwbKey(s.id) === clean);
+    }
+  } else {
+    shipment = shipmentOrTarget;
+    targetId = shipment.id || '';
+    targetMawb = shipment.mawbNumber || shipment.primaryKey || '';
+    targetHawb = shipment.hawbNumber || '';
+  }
+
+  if (shipment) {
+    targetId = targetId || shipment.id || '';
+    targetMawb = targetMawb || shipment.mawbNumber || '';
+    targetHawb = targetHawb || shipment.hawbNumber || '';
+  }
+
+  const cleanTargetMawb = cleanAwbKey(targetMawb);
+  const cleanTargetHawb = cleanAwbKey(targetHawb);
+  const cleanTargetId = cleanAwbKey(targetId);
+
+  const allLogs = getEmailLogs();
+  const matchedLogs: CustomsEmailLog[] = allLogs.filter((l) => {
+    if (targetId && l.shipmentId === targetId) return true;
+    if (cleanTargetMawb && cleanAwbKey(l.mawbNumber) === cleanTargetMawb) return true;
+    if (cleanTargetHawb && cleanAwbKey(l.hawbNumber) === cleanTargetHawb) return true;
+    if (cleanTargetId && (cleanAwbKey(l.shipmentId) === cleanTargetId || cleanAwbKey(l.id).includes(cleanTargetId))) return true;
+    return false;
+  });
+
+  // Also include CustomsQas as email thread messages if present
+  if (shipment && Array.isArray(shipment.customsQas)) {
+    for (const qa of shipment.customsQas) {
+      // 1. Broker Question
+      if (qa.brokerQuestion) {
+        const qId = `qa_q_${qa.id}`;
+        if (!matchedLogs.some((m) => m.id === qId)) {
+          matchedLogs.push({
+            id: qId,
+            shipmentId: shipment.id,
+            mawbNumber: shipment.mawbNumber,
+            hawbNumber: shipment.hawbNumber,
+            threadId: qa.id,
+            direction: 'INCOMING',
+            type: 'BROKER_QUESTION',
+            status: 'RECEIVED',
+            sentOrReceivedAt: qa.brokerQuestion.askedAt || qa.createdAt,
+            sender: {
+              name: qa.brokerQuestion.brokerName || '社内通関士',
+              email: qa.brokerQuestion.brokerEmail || 'customs-brokerage@yourcompany.com',
+            },
+            toRecipients: [qa.brokerQuestion.receivedAtGroupEmail || 'hellmann-air-ops@yourcompany.com'],
+            subject: qa.brokerQuestion.subject || `【通関質疑】${qa.title} (HAWB: ${shipment.hawbNumber || shipment.id})`,
+            body: qa.brokerQuestion.questionText,
+          });
+        }
+      }
+
+      // 2. Hellmann Inquiry
+      if (qa.hellmannInquiry) {
+        const inqId = `qa_inq_${qa.id}`;
+        if (!matchedLogs.some((m) => m.id === inqId)) {
+          matchedLogs.push({
+            id: inqId,
+            shipmentId: shipment.id,
+            mawbNumber: shipment.mawbNumber,
+            hawbNumber: shipment.hawbNumber,
+            threadId: qa.id,
+            direction: 'OUTGOING',
+            type: 'CUSTOMS_INQUIRY',
+            status: 'SENT',
+            sentOrReceivedAt: qa.hellmannInquiry.sentAt || qa.updatedAt,
+            sender: {
+              name: qa.hellmannInquiry.senderName || '輸出オペレーションチーム',
+              email: qa.hellmannInquiry.sentFromGroupEmail || 'hellmann-air-ops@yourcompany.com',
+            },
+            toRecipients: ['export-ops.tyo@hellmann.com'],
+            subject: qa.hellmannInquiry.subject || `Re: 【通関照会】${qa.title} (MAWB: ${shipment.mawbNumber})`,
+            body: qa.hellmannInquiry.sentContent,
+          });
+        }
+      }
+
+      // 3. Hellmann Answer
+      if (qa.hellmannAnswer) {
+        const ansId = `qa_ans_${qa.id}`;
+        if (!matchedLogs.some((m) => m.id === ansId)) {
+          matchedLogs.push({
+            id: ansId,
+            shipmentId: shipment.id,
+            mawbNumber: shipment.mawbNumber,
+            hawbNumber: shipment.hawbNumber,
+            threadId: qa.id,
+            direction: 'INCOMING',
+            type: 'HELLMANN_ANSWER',
+            status: 'RECEIVED',
+            sentOrReceivedAt: qa.hellmannAnswer.receivedAt || qa.updatedAt,
+            sender: {
+              name: 'Hellmann Worldwide Logistics (回答担当)',
+              email: 'export-ops.tyo@hellmann.com',
+            },
+            toRecipients: [qa.hellmannAnswer.receivedAtGroupEmail || 'hellmann-air-ops@yourcompany.com'],
+            subject: `Re: 【通関回答】${qa.title} (MAWB: ${shipment.mawbNumber})`,
+            body: qa.hellmannAnswer.answerText,
+            attachments: qa.hellmannAnswer.attachments,
+          });
+        }
+      }
+
+      // 4. Broker Reply
+      if (qa.brokerReply) {
+        const repId = `qa_rep_${qa.id}`;
+        if (!matchedLogs.some((m) => m.id === repId)) {
+          matchedLogs.push({
+            id: repId,
+            shipmentId: shipment.id,
+            mawbNumber: shipment.mawbNumber,
+            hawbNumber: shipment.hawbNumber,
+            threadId: qa.id,
+            direction: 'OUTGOING',
+            type: 'BROKER_REPLY',
+            status: 'SENT',
+            sentOrReceivedAt: qa.brokerReply.sentAt || qa.updatedAt,
+            sender: {
+              name: '輸出オペレーションチーム',
+              email: qa.brokerReply.sentFromGroupEmail || 'hellmann-air-ops@yourcompany.com',
+            },
+            toRecipients: [qa.brokerQuestion?.brokerEmail || 'customs-brokerage@yourcompany.com'],
+            subject: `【通関士回答】${qa.title} について (HAWB: ${shipment.hawbNumber || shipment.id})`,
+            body: qa.brokerReply.replyText,
+            attachments: qa.brokerReply.forwardedAttachments,
+          });
+        }
+      }
+    }
+  }
+
+  // Sort chronological order (oldest to newest for natural conversation thread flow)
+  return matchedLogs.sort(
+    (a, b) => new Date(a.sentOrReceivedAt).getTime() - new Date(b.sentOrReceivedAt).getTime()
+  );
+}
+
 /**
  * Requirement 5 Logic:
  * Calculate Overall Shipment Status based on sub-tasks
@@ -786,6 +1448,7 @@ export function createShipment(data: {
   tasksTitles?: string[];
   initialTasks?: { title: string; shortName?: string }[];
   isDgCargo?: boolean;
+  isHeavyCargo?: boolean;
   isImportant?: boolean;
   isUrgent?: boolean;
   assignedOperator?: Operator | null;
@@ -869,6 +1532,7 @@ export function createShipment(data: {
     cutTime: data.cutTime || null,
     status: initialStatus,
     isDgCargo: !!data.isDgCargo,
+    isHeavyCargo: data.isHeavyCargo !== undefined ? data.isHeavyCargo : undefined,
     isImportant: !!data.isImportant,
     isUrgent: !!data.isUrgent,
     assignedOperator: data.assignedOperator || null,
@@ -992,7 +1656,7 @@ export function updateTaskStatus(
   shipment.updatedAt = new Date().toISOString();
   ensureShipmentPdf(shipment);
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   // Log Activity
   const statusLabelMap: Record<TaskStatus, string> = {
@@ -1052,7 +1716,7 @@ export function completeAllTasksForShipment(shipmentId: string): Shipment | unde
   shipment.updatedAt = isoNow;
   ensureShipmentPdf(shipment);
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   addActivityLog(
     shipmentId,
@@ -1078,7 +1742,7 @@ export function assignTask(shipmentId: string, taskId: string, user: User | null
   task.assignedTo = user;
   task.updatedAt = new Date().toISOString();
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   const currentUser = getCurrentUser();
   const userName = user ? user.displayName : '未割当';
@@ -1125,7 +1789,7 @@ export function addTaskToShipment(
   shipment.updatedAt = now;
   ensureShipmentPdf(shipment);
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   addActivityLog(
     shipmentId,
@@ -1153,7 +1817,7 @@ export function deleteTaskFromShipment(shipmentId: string, taskId: string): Ship
   shipment.updatedAt = new Date().toISOString();
   ensureShipmentPdf(shipment);
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   addActivityLog(
     shipmentId,
@@ -1179,7 +1843,7 @@ export function reorderTasks(shipmentId: string, reorderedTasks: Task[]): Shipme
   shipment.updatedAt = new Date().toISOString();
   ensureShipmentPdf(shipment);
 
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
   return shipment;
 }
 
@@ -1207,10 +1871,10 @@ export function deleteShipment(shipmentId: string): void {
   saveShipments(shipments);
 }
 
-// Update Shipment Flags (isImportant, isUrgent, isDgCargo)
+// Update Shipment Flags (isImportant, isUrgent, isDgCargo, isHeavyCargo)
 export function updateShipmentFlags(
   shipmentId: string,
-  updates: Partial<Pick<Shipment, 'isImportant' | 'isUrgent' | 'isDgCargo'>>
+  updates: Partial<Pick<Shipment, 'isImportant' | 'isUrgent' | 'isDgCargo' | 'isHeavyCargo'>>
 ): Shipment | undefined {
   const shipments = getShipments();
   const shipment = shipments.find((s) => s.id === shipmentId);
@@ -1231,9 +1895,13 @@ export function updateShipmentFlags(
     shipment.isDgCargo = updates.isDgCargo;
     changedFields.push(`DG設定: ${updates.isDgCargo ? 'ON' : 'OFF'}`);
   }
+  if (updates.isHeavyCargo !== undefined && updates.isHeavyCargo !== shipment.isHeavyCargo) {
+    shipment.isHeavyCargo = updates.isHeavyCargo;
+    changedFields.push(`重量案件設定: ${updates.isHeavyCargo ? 'ON' : 'OFF'}`);
+  }
 
   shipment.updatedAt = new Date().toISOString();
-  saveShipments(shipments);
+  saveShipments(shipments, [shipmentId], true);
 
   if (changedFields.length > 0) {
     addActivityLog(
@@ -1256,6 +1924,8 @@ export function updateShipmentFields(
     hawbNumber?: string | null;
     pieces?: string | null;
     grossWeight?: string | null;
+    isHeavyCargo?: boolean;
+    isImportant?: boolean;
     shipper?: string;
     consignee?: string;
     portOfLoading?: string | null;
@@ -1293,6 +1963,14 @@ export function updateShipmentFields(
   if (updates.grossWeight !== undefined && updates.grossWeight !== shipment.grossWeight) {
     changedList.push(`重量: ${shipment.grossWeight || '-'} → ${updates.grossWeight || '-'}`);
     shipment.grossWeight = updates.grossWeight && updates.grossWeight.trim() ? updates.grossWeight.trim() : null;
+  }
+  if (updates.isHeavyCargo !== undefined && updates.isHeavyCargo !== shipment.isHeavyCargo) {
+    changedList.push(`重量案件: ${updates.isHeavyCargo ? '対象' : '非対象'}`);
+    shipment.isHeavyCargo = updates.isHeavyCargo;
+  }
+  if (updates.isImportant !== undefined && updates.isImportant !== shipment.isImportant) {
+    changedList.push(`重要案件: ${updates.isImportant ? '対象' : '非対象'}`);
+    shipment.isImportant = updates.isImportant;
   }
   if (updates.shipper !== undefined && updates.shipper !== shipment.shipper) {
     changedList.push(`SHIPPER: ${shipment.shipper} → ${updates.shipper}`);
@@ -1357,7 +2035,7 @@ export function updateShipmentFields(
   ensureShipmentPdf(shipment);
 
   shipments[index] = shipment;
-  saveShipmentsHelper(shipments);
+  saveShipmentsHelper(shipments, [shipment.id], true);
 
   if (changedList.length > 0) {
     addActivityLog(
@@ -1513,13 +2191,6 @@ export function togglePinShipment(shipmentId: string): Shipment | undefined {
   return shipment;
 }
 
-// Reset Store to Initial Demo Data
-export function resetToDemoData(): void {
-  localStorage.setItem(STORAGE_KEYS.SHIPMENTS, JSON.stringify(INITIAL_SHIPMENTS));
-  localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(INITIAL_LOGS));
-  notifyListeners();
-}
-
 /**
  * Requirement: Progress Milestones ('貨物搬入済', 'X線検査結果入手', '許可書入手', '請求書メール')
  * Update milestone status, save locally & sync automatically to Firestore with timestamp.
@@ -1573,11 +2244,8 @@ export function updateShipmentMilestones(
   shipment.milestones = currentMilestones;
   shipment.updatedAt = now.toISOString();
 
-  // Save to LocalStorage & notify UI listeners
-  saveShipments(shipments);
-
-  // Sync to Firestore automatically in background without blocking UI
-  // Handled by saveShipmentsHelper
+  // Save to LocalStorage & notify UI listeners with immediate sync
+  saveShipments(shipments, [shipmentId], true);
 
   // Activity Log
   const currentUser = getCurrentUser();
@@ -1624,6 +2292,27 @@ export function updateShipmentPdf(shipmentId: string, pdfDataUrl: string): Shipm
     '📄 指示書PDFが再アップロード・更新されました。'
   );
 
+  return updatedShipment;
+}
+
+export function updateShipment(
+  shipmentId: string,
+  updater: Partial<Shipment> | ((s: Shipment) => Shipment)
+): Shipment | undefined {
+  const shipments = getShipments();
+  const index = shipments.findIndex((s) => s.id === shipmentId);
+  if (index === -1) return undefined;
+
+  const currentShipment = shipments[index];
+  const updatedShipment =
+    typeof updater === 'function'
+      ? updater({ ...currentShipment })
+      : { ...currentShipment, ...updater };
+  updatedShipment.updatedAt = new Date().toISOString();
+
+  shipments[index] = updatedShipment;
+  saveShipments(shipments);
+  notifyListeners();
   return updatedShipment;
 }
 

@@ -65,10 +65,10 @@ export const DetailCalculatorModal: React.FC<DetailCalculatorModalProps> = ({
   // 入力パラメータ状態
   const [ranCount, setRanCount] = useState<number>(1);
   const [pieces, setPieces] = useState<number>(() =>
-    shipment ? extractNumeric(shipment.pkgCount, shipment.pieces) : 0
+    shipment ? extractNumeric((shipment as any).pkgCount, shipment.pieces) : 0
   );
   const [weight, setWeight] = useState<number>(() =>
-    shipment ? extractNumeric(shipment.weight, shipment.grossWeight) : 0
+    shipment ? extractNumeric((shipment as any).weight, shipment.grossWeight) : 0
   );
 
   const ranInputRef = useRef<HTMLInputElement>(null);
@@ -77,8 +77,8 @@ export const DetailCalculatorModal: React.FC<DetailCalculatorModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       if (shipment) {
-        setWeight(extractNumeric(shipment.weight, shipment.grossWeight));
-        setPieces(extractNumeric(shipment.pkgCount, shipment.pieces));
+        setWeight(extractNumeric((shipment as any).weight, shipment.grossWeight));
+        setPieces(extractNumeric((shipment as any).pkgCount, shipment.pieces));
       }
       setTimeout(() => {
         if (ranInputRef.current) {
@@ -258,18 +258,18 @@ export const DetailCalculatorModal: React.FC<DetailCalculatorModalProps> = ({
               <div className="flex items-center space-x-2 truncate">
                 <span className="text-slate-400 font-medium">初期値(タスク情報):</span>
                 <span className="font-mono text-indigo-300 font-bold">
-                  個数 {extractNumeric(shipment.pkgCount, shipment.pieces)}個
+                  個数 {extractNumeric((shipment as any).pkgCount, shipment.pieces)}個
                 </span>
                 <span className="text-slate-600">/</span>
                 <span className="font-mono text-indigo-300 font-bold">
-                  重量 {extractNumeric(shipment.weight, shipment.grossWeight)}kg
+                  重量 {extractNumeric((shipment as any).weight, shipment.grossWeight)}kg
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  setWeight(extractNumeric(shipment.weight, shipment.grossWeight));
-                  setPieces(extractNumeric(shipment.pkgCount, shipment.pieces));
+                  setWeight(extractNumeric((shipment as any).weight, shipment.grossWeight));
+                  setPieces(extractNumeric((shipment as any).pkgCount, shipment.pieces));
                 }}
                 className="ml-2 text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center shrink-0 cursor-pointer hover:underline"
                 title="案件タスクの初期値で再セット"

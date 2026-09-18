@@ -9,6 +9,7 @@ import {
   togglePinShipment,
 } from '../lib/storageManager';
 import { exportShipmentsToExcel } from '../lib/excelExportService';
+import { isHeavyShipment } from '../lib/awbUtils';
 import { GanttChartView } from './GanttChartView';
 import { PdfZoomModal } from './PdfZoomModal';
 import { ShipmentDetail } from './ShipmentDetail';
@@ -627,9 +628,9 @@ export const StandaloneTaskView: React.FC = () => {
                 <div className="flex flex-wrap items-center gap-2 mt-1">
                   {displayedShipments
                     .filter((s) => !!s.cutTime)
-                    .map((s) => (
+                    .map((s, sIdx) => (
                       <span
-                        key={s.id}
+                        key={`${s.id}-${sIdx}`}
                         onClick={() => setZoomShipment(s)}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/10 hover:bg-white/20 border border-rose-400/60 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer"
                         title="クリックしてSI指示書PDFを表示"
@@ -688,15 +689,21 @@ export const StandaloneTaskView: React.FC = () => {
                   ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
                   : '';
 
+              const isHeavy = isHeavyShipment(shipment);
+
               return (
                 <motion.div
-                  key={shipment.id}
+                  key={`${shipment.id}-${idx}`}
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.2, delay: idx * 0.04 }}
                   className={`rounded-3xl border transition-all p-3.5 flex flex-col justify-between space-y-2.5 shadow-xs hover:shadow-md ${
                     shipment.isPinned
-                      ? 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/20 shadow-md'
+                      ? isHeavy
+                        ? 'border-blue-500 ring-2 ring-blue-400/60 bg-red-50/90 shadow-md'
+                        : 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/20 shadow-md'
+                      : isHeavy
+                      ? 'border-red-300 ring-1 ring-red-300/60 bg-red-50/80 shadow-xs hover:border-red-400 hover:bg-red-50/95'
                       : shipment.isUrgent
                       ? 'border-rose-400 bg-rose-50/20 shadow-md hover:border-rose-500'
                       : shipment.isImportant
@@ -718,6 +725,13 @@ export const StandaloneTaskView: React.FC = () => {
                         <span className="px-2.5 py-0.5 text-xs sm:text-[13px] font-black tracking-tight rounded-md bg-blue-950 text-white border border-blue-800 uppercase font-mono shadow-2xs">
                           {shipment.id}
                         </span>
+
+                        {/* 重量案件バッジ */}
+                        {isHeavy && (
+                          <span className="px-2 py-0.5 text-[10px] font-black rounded-lg bg-red-600 text-white shadow-xs flex items-center space-x-1 border border-red-500 animate-pulse">
+                            <span>重量案件</span>
+                          </span>
+                        )}
 
                         {memoCount > 0 && (
                           <span
@@ -1098,6 +1112,10 @@ export const StandaloneTaskView: React.FC = () => {
           shipment={zoomShipment}
           isOpen={!!zoomShipment}
           onClose={() => setZoomShipment(null)}
+          onReturnToDashboard={() => {
+            setZoomShipment(null);
+            setDetailShipment(null);
+          }}
           onShipmentUpdated={(updated) => {
             setZoomShipment(updated);
           }}

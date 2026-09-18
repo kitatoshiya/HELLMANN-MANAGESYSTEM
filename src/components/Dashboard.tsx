@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Shipment, ShipmentStatus, StatusFilterType } from '../types';
-import { Search, Plane, Clock, CheckCircle2, Circle, AlertCircle, ArrowRight, Calendar, Trash2, LayoutGrid, List, FileText, ZoomIn, Star, Zap, AlertOctagon, Package, Scale, ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, Edit3, Pin, Mail, Layers, FileCheck, MessageSquare, MessageSquareText, BarChart3, Database, Flame, Table } from 'lucide-react';
+import { Search, Plane, Clock, CheckCircle2, Circle, AlertCircle, ArrowRight, Calendar, Trash2, LayoutGrid, List, FileText, ZoomIn, Star, Zap, AlertOctagon, Package, Scale, ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, Edit3, Pin, Mail, Layers, FileCheck, MessageSquare, MessageSquareText, BarChart3, Database, Flame, Table, HelpCircle } from 'lucide-react';
 import { deleteShipment, togglePinShipment, getCurrentUser } from '../lib/storageManager';
 import { SiDocumentViewer } from './SiDocumentViewer';
 import { PdfZoomModal } from './PdfZoomModal';
@@ -9,6 +9,8 @@ import { CalendarView } from './CalendarView';
 import { ShipmentEditModal } from './ShipmentEditModal';
 import { CustomsEmailModal } from './CustomsEmailModal';
 import { TableView } from './TableView';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
+import { getCustomsQaDashboardBadge } from '../lib/m365EmailService';
 
 interface DashboardProps {
   shipments: Shipment[];
@@ -550,26 +552,36 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
             const memoCount = shipment.comments?.length || 0;
             const hasImportantMemo = shipment.comments?.some((c) => c.isImportant);
             const latestComment = memoCount > 0 ? shipment.comments![0] : null;
-            const memoTooltip = memoCount > 0
+              const memoTooltip = memoCount > 0
               ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
               : '';
 
+            const isHeavy = isHeavyShipment(shipment);
+            const isImportant = isImportantShipment(shipment);
+            const qaBadge = getCustomsQaDashboardBadge(shipment.customsQas);
+
             return (
               <motion.div
-                key={shipment.id}
+                key={`${shipment.id}-${idx}`}
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.2, delay: idx * 0.05 }}
                 whileHover={{ y: -2 }}
                 onClick={() => onSelectShipment(shipment)}
-                className={`bg-white rounded-3xl border transition-all p-4 flex flex-col justify-between space-y-3 group relative cursor-pointer ${
+                className={`rounded-3xl border transition-all p-4 flex flex-col justify-between space-y-3 group relative cursor-pointer ${
                   shipment.isPinned
-                    ? 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/10 shadow-md hover:shadow-xl'
+                    ? isImportant
+                      ? 'border-blue-500 ring-2 ring-blue-400/60 bg-red-100/80 shadow-md hover:shadow-xl'
+                      : isHeavy
+                      ? 'border-blue-500 ring-2 ring-blue-400/60 bg-amber-100/80 shadow-md hover:shadow-xl'
+                      : 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/10 shadow-md hover:shadow-xl'
+                    : isImportant
+                    ? 'border-red-400 ring-1 ring-red-400/60 bg-red-50/90 shadow-md hover:border-red-500 hover:shadow-xl hover:bg-red-100/80'
+                    : isHeavy
+                    ? 'border-amber-400 ring-1 ring-amber-300/80 bg-amber-50/90 shadow-xs hover:border-amber-500 hover:shadow-xl hover:bg-amber-100/80'
                     : shipment.isUrgent
                     ? 'border-rose-400 bg-rose-50/10 shadow-md hover:border-rose-500 hover:shadow-xl'
-                    : shipment.isImportant
-                    ? 'border-amber-400 bg-amber-50/10 shadow-md hover:border-amber-500 hover:shadow-xl'
-                    : 'border-slate-200 shadow-xs hover:shadow-xl hover:border-blue-400'
+                    : 'border-slate-200 bg-white shadow-xs hover:shadow-xl hover:border-blue-400'
                 }`}
               >
                 {/* Header Meta & Priority Warning Badges */}
@@ -587,6 +599,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                       <span className="px-2.5 py-0.5 text-xs sm:text-[13px] font-black tracking-tight rounded-md bg-blue-950 text-white border border-blue-800 uppercase font-mono shadow-2xs">
                         {shipment.id}
                       </span>
+
+                      {/* 重要案件バッジ (薄赤ハイライト対応) */}
+                      {isImportant && (
+                        <span className="px-2 py-0.5 text-[10px] font-black rounded-lg bg-red-600 text-white shadow-xs flex items-center space-x-1 border border-red-500 animate-pulse">
+                          <Star className="w-3 h-3 fill-current text-white" />
+                          <span>重要案件</span>
+                        </span>
+                      )}
+
+                      {/* 重量案件バッジ (黄色系ハイライト対応) */}
+                      {isHeavy && (
+                        <span className="px-2 py-0.5 text-[10px] font-black rounded-lg bg-amber-500 text-white shadow-xs flex items-center space-x-1 border border-amber-600">
+                          <span>重量案件</span>
+                        </span>
+                      )}
 
                       {/* Status Badge */}
                       <span
@@ -617,6 +644,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                         >
                           <MessageSquareText className={`w-3 h-3 shrink-0 ${hasImportantMemo ? 'text-white' : 'text-indigo-600'}`} />
                           <span>{hasImportantMemo ? `🔴 重要メモ ${memoCount}件` : `メモ ${memoCount}件`}</span>
+                        </span>
+                      )}
+
+                      {/* Customs QA Status Badge (e.g. ヘルマン照会中) */}
+                      {qaBadge && (
+                        <span
+                          className={`px-2 py-0.5 text-[10px] font-black rounded-lg border shadow-2xs flex items-center space-x-1 transition-colors ${qaBadge.badgeClass}`}
+                          title={`【通関質疑ハブ】\n${qaBadge.fullLabel}\nクリックで通関質疑ハブ・案件詳細を開きます`}
+                        >
+                          <HelpCircle className="w-3 h-3 shrink-0" />
+                          <span>{qaBadge.shortLabel}</span>
+                          {qaBadge.count > 1 && (
+                            <span className="text-[9px] bg-black/20 px-1 py-0.2 rounded font-black">
+                              {qaBadge.count}
+                            </span>
+                          )}
                         </span>
                       )}
 
@@ -883,7 +926,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs">
-                {sortedShipments.map((s) => {
+                {sortedShipments.map((s, idx) => {
                   const completedTaskCount = s.tasks.filter((t) => t.status === 'Completed').length;
                   const totalTaskCount = s.tasks.length;
                   const progressPct = totalTaskCount > 0 ? Math.round((completedTaskCount / totalTaskCount) * 100) : 0;
@@ -902,18 +945,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                     ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n${latestImportantComment ? `[重要メモ] ${latestImportantComment.content}\n\n` : ''}最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
                     : '';
 
+                  const isHeavy = isHeavyShipment(s);
+                  const isImportant = isImportantShipment(s);
+
                   return (
                     <tr
-                      key={s.id}
+                      key={`${s.id}-${idx}`}
                       onClick={() => onSelectShipment(s)}
-                      className={`hover:bg-blue-50/40 cursor-pointer transition-colors group ${
+                      className={`cursor-pointer transition-colors group ${
                         s.isPinned
-                          ? 'bg-blue-50/25 border-l-4 border-l-blue-600'
+                          ? isImportant
+                            ? 'bg-red-100/85 hover:bg-red-200/75 border-l-4 border-l-blue-600'
+                            : isHeavy
+                            ? 'bg-amber-100/85 hover:bg-amber-200/75 border-l-4 border-l-blue-600'
+                            : 'bg-blue-50/25 hover:bg-blue-50/40 border-l-4 border-l-blue-600'
+                          : isImportant
+                          ? 'bg-red-50/90 hover:bg-red-100/80 border-l-4 border-l-red-500'
+                          : isHeavy
+                          ? 'bg-amber-50/90 hover:bg-amber-100/80 border-l-4 border-l-amber-500'
                           : s.isUrgent
-                          ? 'bg-rose-50/20'
-                          : s.isImportant
-                          ? 'bg-amber-50/20'
-                          : ''
+                          ? 'bg-rose-50/20 hover:bg-blue-50/40'
+                          : 'hover:bg-blue-50/40'
                       }`}
                     >
                       {/* Primary Key / AWB Column with PDF Icon and Priority Warnings */}
@@ -938,6 +990,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                                   <span>📌 固定</span>
                                 </span>
                               )}
+
+                              {/* 重要案件バッジ (薄赤ハイライト対応) */}
+                              {isImportant && (
+                                <span className="px-1.5 py-0.5 text-[10px] font-black rounded bg-red-600 text-white shadow-2xs flex items-center space-x-0.5 border border-red-500 animate-pulse">
+                                  <Star className="w-2.5 h-2.5 fill-current text-white" />
+                                  <span>重要案件</span>
+                                </span>
+                              )}
+
+                              {/* 重量案件バッジ (黄色系ハイライト対応) */}
+                              {isHeavy && (
+                                <span className="px-1.5 py-0.5 text-[10px] font-black rounded bg-amber-500 text-white shadow-2xs flex items-center space-x-0.5 border border-amber-600">
+                                  <span>重量案件</span>
+                                </span>
+                              )}
+
                               <span className="font-mono text-[21px] font-black text-blue-950 tracking-tight leading-none">{s.id}</span>
                               {isHawbPrimary ? (
                                 <span className="px-2 py-0.5 text-[11px] font-extrabold rounded-md bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-2xs">
@@ -1034,8 +1102,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
                           <Package className="w-3 h-3 mr-1 text-blue-600 shrink-0" />
                           {s.pieces || '未記載'}
                         </div>
-                        <div className="text-slate-500 flex items-center mt-0.5 font-bold">
-                          <Scale className="w-3 h-3 mr-1 text-blue-600 shrink-0" />
+                        <div className={`flex items-center mt-0.5 font-bold ${isHeavy ? 'text-amber-900 bg-amber-100 px-1 py-0.5 rounded border border-amber-300 w-fit' : 'text-slate-500'}`}>
+                          <Scale className={`w-3 h-3 mr-1 shrink-0 ${isHeavy ? 'text-amber-700' : 'text-blue-600'}`} />
                           {s.grossWeight || '未記載'}
                         </div>
                       </td>
@@ -1192,6 +1260,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ shipments, onSelectShipmen
         shipment={zoomShipment}
         isOpen={!!zoomShipment}
         onClose={() => setZoomShipment(null)}
+        onReturnToDashboard={() => {
+          setZoomShipment(null);
+        }}
         onShipmentUpdated={(updated) => setZoomShipment(updated)}
       />
 

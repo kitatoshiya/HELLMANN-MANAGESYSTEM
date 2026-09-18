@@ -776,7 +776,7 @@ export const SiDocumentViewer: React.FC<SiDocumentViewerProps> = ({
             isThumbnail={false}
             scale={zoomScale}
             enableAnnotation={true}
-            authorName={shipment.assignedOperator || '担当者'}
+            authorName={typeof shipment.assignedOperator === 'string' ? shipment.assignedOperator : (shipment.assignedOperator as any)?.name || '担当者'}
             className="w-full h-full"
           />
         </div>

@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Shipment, Task } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
-import { ChevronDown, ChevronRight, FileText, MoreVertical, Edit, Trash2, Printer, CheckCircle2, Circle, Eye, Mail, MessageSquare, Check } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileText, MoreVertical, Edit, Trash2, Printer, CheckCircle2, Circle, Eye, Mail, MessageSquare, Check, HelpCircle } from 'lucide-react';
 import { updateTaskStatus, togglePinShipment } from '../lib/storageManager';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
+import { getCustomsQaDashboardBadge } from '../lib/m365EmailService';
 import { PdfZoomModal } from './PdfZoomModal';
 import { CustomsEmailModal } from './CustomsEmailModal';
 
@@ -183,7 +185,7 @@ export const TableView: React.FC<TableViewProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {sortedShipments.map(shipment => {
+            {sortedShipments.map((shipment, idx) => {
               const progress = getProgressInfo(shipment.tasks);
               const isPinned = !!shipment.isPinned;
               const isExpanded = expandedRows.has(shipment.id);
@@ -198,16 +200,27 @@ export const TableView: React.FC<TableViewProps> = ({
                 : null;
               const memoCount = shipment.comments?.length || 0;
               const importantSnippet = latestImportantMemo ? latestImportantMemo.content.trim().slice(0, 20) : '';
+              const isHeavy = isHeavyShipment(shipment);
+              const isImportant = isImportantShipment(shipment);
+              const qaBadge = getCustomsQaDashboardBadge(shipment.customsQas);
               
               return (
-                <React.Fragment key={shipment.id}>
+                <React.Fragment key={`${shipment.id}-${idx}`}>
                   <tr 
-                    className={`group transition-colors hover:bg-blue-50/40 cursor-pointer ${
+                    className={`group transition-colors cursor-pointer ${
                       isPinned 
-                        ? 'bg-blue-50/25 border-l-4 border-l-blue-600' 
+                        ? isImportant
+                          ? 'bg-red-100/80 hover:bg-red-200/70 border-l-4 border-l-blue-600'
+                          : isHeavy
+                          ? 'bg-amber-100/80 hover:bg-amber-200/70 border-l-4 border-l-blue-600'
+                          : 'bg-blue-50/25 hover:bg-blue-50/40 border-l-4 border-l-blue-600'
+                        : isImportant
+                        ? 'bg-red-50/90 hover:bg-red-100/80 border-l-4 border-l-red-500 shadow-2xs'
+                        : isHeavy
+                        ? 'bg-amber-50/90 hover:bg-amber-100/80 border-l-4 border-l-amber-500'
                         : nearCutoff && shipment.cutTime 
-                        ? 'bg-red-50/30' 
-                        : ''
+                        ? 'bg-red-50/30 hover:bg-blue-50/40' 
+                        : 'hover:bg-blue-50/40'
                     }`}
                     onClick={() => toggleRow(shipment.id)}
                   >
@@ -218,6 +231,18 @@ export const TableView: React.FC<TableViewProps> = ({
                       <span className={`text-sm cursor-pointer transition-all inline-block select-none ${isPinned ? 'text-rose-500 scale-110 drop-shadow-xs' : 'text-slate-300 hover:text-rose-400 opacity-0 group-hover:opacity-100'}`}>📌</span>
                     </td>
                     <td className="px-2.5 py-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {isImportant && (
+                          <span className="px-1.5 py-0.2 text-[9px] font-black bg-red-600 text-white rounded shadow-2xs border border-red-500 animate-pulse inline-block">
+                            ★重要案件
+                          </span>
+                        )}
+                        {isHeavy && (
+                          <span className="px-1.5 py-0.2 text-[9px] font-black bg-amber-500 text-white rounded shadow-2xs border border-amber-600 inline-block">
+                            重量案件
+                          </span>
+                        )}
+                      </div>
                       {hawb ? (
                         <div className="flex flex-col justify-center">
                           {/* HAWB is bold, prominent, and green */}
@@ -263,10 +288,12 @@ export const TableView: React.FC<TableViewProps> = ({
                         <span className="text-slate-400 text-[11px]">-</span>
                       )}
                     </td>
-                    <td className="px-2.5 py-1 text-center text-slate-700 font-mono text-[11.5px]">
-                      <span className="font-semibold">{shipment.pieces || '-'}</span>
+                    <td className="px-2.5 py-1 text-center font-mono text-[11.5px]">
+                      <span className="font-semibold text-slate-700">{shipment.pieces || '-'}</span>
                       <span className="mx-0.5 text-slate-300">/</span>
-                      <span className="font-semibold text-slate-900">{shipment.grossWeight || (shipment as any).weight || '-'}</span>
+                      <span className={`font-semibold ${isHeavy ? 'text-amber-900 font-black bg-amber-100 px-1 py-0.5 rounded border border-amber-300' : 'text-slate-900'}`}>
+                        {shipment.grossWeight || (shipment as any).weight || '-'}
+                      </span>
                     </td>
                     <td className="px-2.5 py-1 w-24">
                       <div className="flex items-center space-x-1.5">
@@ -300,34 +327,54 @@ export const TableView: React.FC<TableViewProps> = ({
                       </div>
                     </td>
                     <td className="px-2.5 py-1 text-center" onClick={e => { e.stopPropagation(); onSelectShipment(shipment); }}>
-                      {hasImportantMemo && latestImportantMemo ? (
-                        <div
-                          className="inline-flex items-center gap-1.5 cursor-pointer px-1.5 py-0.5 rounded-md bg-rose-50 border border-rose-200 text-rose-900 hover:bg-rose-100 hover:border-rose-300 transition-all max-w-[260px]"
-                          title={`【最新の重要メモ】\n${latestImportantMemo.content}\n\n【全メモ (${memoCount}件)】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.isImportant ? '★重要 ' : ''}${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
-                        >
-                          <div className="flex items-center gap-0.5 shrink-0">
-                            <FileText className="w-3.5 h-3.5 text-rose-600 animate-pulse" />
-                            <span className="text-[10px] font-bold text-rose-700 whitespace-nowrap">
+                      <div className="inline-flex items-center justify-center gap-1.5 flex-wrap">
+                        {hasImportantMemo && latestImportantMemo ? (
+                          <div
+                            className="inline-flex items-center gap-1.5 cursor-pointer px-1.5 py-0.5 rounded-md bg-rose-50 border border-rose-200 text-rose-900 hover:bg-rose-100 hover:border-rose-300 transition-all max-w-[240px]"
+                            title={`【最新の重要メモ】\n${latestImportantMemo.content}\n\n【全メモ (${memoCount}件)】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.isImportant ? '★重要 ' : ''}${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
+                          >
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <FileText className="w-3.5 h-3.5 text-rose-600 animate-pulse" />
+                              <span className="text-[10px] font-bold text-rose-700 whitespace-nowrap">
+                                {memoCount}件
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-extrabold text-rose-900 truncate leading-tight bg-white/80 px-1 py-0.5 rounded border border-rose-200/70">
+                              {importantSnippet}
+                            </span>
+                          </div>
+                        ) : memoCount > 0 ? (
+                          <div
+                            className="inline-flex items-center justify-center cursor-pointer px-1.5 py-0.5 rounded-full hover:bg-amber-100/60 transition-colors"
+                            title={`【メモ ${memoCount}件】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
+                          >
+                            <FileText className="w-3.5 h-3.5 text-amber-500" />
+                            <span className="text-[10px] ml-1 font-bold text-amber-700 whitespace-nowrap">
                               {memoCount}件
                             </span>
                           </div>
-                          <span className="text-[11px] font-extrabold text-rose-900 truncate leading-tight bg-white/80 px-1 py-0.5 rounded border border-rose-200/70">
-                            {importantSnippet}
-                          </span>
-                        </div>
-                      ) : memoCount > 0 ? (
-                        <div
-                          className="inline-flex items-center justify-center cursor-pointer px-1.5 py-0.5 rounded-full hover:bg-amber-100/60 transition-colors"
-                          title={`【メモ ${memoCount}件】\n` + (shipment.comments || []).map(c => `[${c.formattedTime}] ${c.authorName ? `${c.authorName}: ` : ''}${c.content}`).join('\n')}
-                        >
-                          <FileText className="w-3.5 h-3.5 text-amber-500" />
-                          <span className="text-[10px] ml-1 font-bold text-amber-700 whitespace-nowrap">
-                            {memoCount}件
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-300 text-[11px]">-</span>
-                      )}
+                        ) : null}
+
+                        {/* Customs QA Status Badge (ヘルマン照会中 / 回答あり / 未照会) */}
+                        {qaBadge && (
+                          <div
+                            className={`inline-flex items-center gap-1 cursor-pointer px-1.5 py-0.5 rounded-md text-[10.5px] font-black border transition-all ${qaBadge.badgeClass}`}
+                            title={`【通関質疑ハブ】\n${qaBadge.fullLabel}\nクリックで通関質疑ハブ・案件詳細を開きます`}
+                          >
+                            <HelpCircle className="w-3 h-3 shrink-0" />
+                            <span className="whitespace-nowrap">{qaBadge.shortLabel}</span>
+                            {qaBadge.count > 1 && (
+                              <span className="text-[9px] bg-black/20 px-1 py-0.2 rounded font-black">
+                                {qaBadge.count}
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {!hasImportantMemo && memoCount === 0 && !qaBadge && (
+                          <span className="text-slate-300 text-[11px]">-</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-2.5 py-1 text-center" onClick={e => e.stopPropagation()}>
                       <button
@@ -430,6 +477,9 @@ export const TableView: React.FC<TableViewProps> = ({
           shipment={previewPdfShipment}
           isOpen={!!previewPdfShipment}
           onClose={() => setPreviewPdfShipment(null)}
+          onReturnToDashboard={() => {
+            setPreviewPdfShipment(null);
+          }}
           onShipmentUpdated={(updated) => {
             setPreviewPdfShipment(updated);
             if (onShipmentUpdated) {

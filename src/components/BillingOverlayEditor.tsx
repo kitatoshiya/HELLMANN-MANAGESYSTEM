@@ -46,6 +46,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
   const [presets, setPresets] = useState<BillingPresetPattern[]>(() => getLocalPresets());
 
   // Initialize billing items from shipment (if 2nd time or already set) or from default preset (if 1st time)
+  // All initial amounts are blank ('') as requested
   const [items, setItems] = useState<BillingItem[]>(() => {
     if (shipment.billingItems && shipment.billingItems.length > 0) {
       return shipment.billingItems;
@@ -57,10 +58,10 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
         id: `item_${Date.now()}_${idx}`,
         taxable: it.taxable,
         name: it.name,
-        amount: it.amount,
+        amount: '', // 初回表示・取り込み直後は金額をすべて空白にする
       }));
     }
-    return getDefaultBillingItems();
+    return getDefaultBillingItems(true);
   });
 
   // Initialize selectedPresetId synchronously
@@ -107,7 +108,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
           id: `item_${Date.now()}_${idx}`,
           taxable: it.taxable,
           name: it.name,
-          amount: it.amount,
+          amount: '' as const, // 初回表示は金額をすべて空白にする
         }));
         setSelectedPresetId(def.id);
         setItems(initialItems);
@@ -133,7 +134,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
                 id: `item_${Date.now()}_${idx}`,
                 taxable: it.taxable,
                 name: it.name,
-                amount: it.amount,
+                amount: '', // 初回表示は金額をすべて空白にする
               }));
             }
             return prevItems;

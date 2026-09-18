@@ -19,11 +19,15 @@ import {
   updateShipmentMilestones,
   updateShipmentPdf,
   completeAllTasksForShipment,
+  getShipments,
 } from '../lib/storageManager';
 
 import { fetchAllOperators } from '../lib/operatorService';
 import { fetchAllTaskMasters, getLocalTaskMasters } from '../lib/taskMasterService';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
 import { TaskMaster } from '../types';
+import { CustomsQaRelayPanel } from './CustomsQaRelayPanel';
+import { getCustomsQaStatusBadgeInfo } from '../lib/m365EmailService';
 import {
   ArrowLeft,
   Plane,
@@ -61,6 +65,8 @@ import {
   Sparkles,
   CheckCheck,
   Check,
+  X,
+  ExternalLink,
 } from 'lucide-react';
 import { PdfZoomModal } from './PdfZoomModal';
 import { SiDocumentViewer } from './SiDocumentViewer';
@@ -82,10 +88,11 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [showAddTask, setShowAddTask] = useState(false);
-  const [activeTab, setActiveTab] = useState<'tasks' | 'comments' | 'logs'>('tasks');
+  const [activeTab, setActiveTab] = useState<'tasks' | 'comments' | 'logs' | 'customs_qa'>('tasks');
   const [showZoomModal, setShowZoomModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
+  const [showCustomsQaModal, setShowCustomsQaModal] = useState(false);
   const [showDeleteShipmentConfirm, setShowDeleteShipmentConfirm] = useState(false);
   const [showCompleteAllModal, setShowCompleteAllModal] = useState(false);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string; title: string } | null>(null);
@@ -145,6 +152,10 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
   const refreshData = () => {
     const updatedLogs = getActivityLogs(initialShipment.id);
     setLogs(updatedLogs);
+    const updatedShipment = getShipments().find((s) => s.id === initialShipment.id);
+    if (updatedShipment) {
+      setShipment({ ...updatedShipment });
+    }
   };
 
   useEffect(() => {
@@ -360,6 +371,13 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
     if (updated) setShipment({ ...updated });
   };
 
+  const isHeavy = isHeavyShipment(shipment);
+
+  const handleToggleHeavyCargo = () => {
+    const updated = updateShipmentFlags(shipment.id, { isHeavyCargo: !isHeavy });
+    if (updated) setShipment({ ...updated });
+  };
+
   const handleToggleMilestone = (key: MilestoneKey, currentCompleted: boolean) => {
     const updated = updateShipmentMilestones(shipment.id, key, !currentCompleted);
     if (updated) {
@@ -521,6 +539,23 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
             通関依頼メール作成
           </button>
 
+          <button
+            onClick={() => {
+              setActiveTab('customs_qa');
+              setShowCustomsQaModal(true);
+            }}
+            className="inline-flex items-center px-3.5 py-2 text-xs font-bold rounded-xl transition-all shadow-2xs cursor-pointer border text-blue-800 bg-blue-50 hover:bg-blue-100 border-blue-200 hover:border-blue-300"
+            title="通関質疑 ＆ ヘルマン照会ハブをポップアップ画面で開きます"
+          >
+            <MessageSquare className="w-4 h-4 mr-1.5 text-blue-600" />
+            <span>通関質疑ハブ</span>
+            {(shipment.customsQas || []).length > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-blue-200 text-blue-900 font-bold">
+                {shipment.customsQas?.length}
+              </span>
+            )}
+          </button>
+
 
           <button
             onClick={() => setShowEditModal(true)}
@@ -633,6 +668,18 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
                   DG (危険物貨物)
                 </span>
               )}
+              {isImportantShipment(shipment) && (
+                <span className="px-2.5 py-0.5 text-[10px] font-black rounded bg-red-600 text-white border border-red-500 inline-flex items-center gap-1 shadow-sm animate-pulse">
+                  <Star className="w-3 h-3 text-white fill-white" />
+                  重要案件 (薄赤色表示)
+                </span>
+              )}
+              {isHeavy && (
+                <span className="px-2.5 py-0.5 text-[10px] font-black rounded bg-amber-500 text-white border border-amber-400 inline-flex items-center gap-1 shadow-sm animate-pulse">
+                  <Scale className="w-3 h-3 text-white" />
+                  重量案件 (1000kg+)
+                </span>
+              )}
               {shipment.assignedOperator && (
                 <span className="px-2.5 py-0.5 text-[10px] font-bold rounded bg-blue-500/30 text-blue-300 border border-blue-500/50 inline-flex items-center gap-1">
                   <UserCheck className="w-3 h-3 text-blue-400" />
@@ -656,18 +703,18 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
               <div className="flex flex-wrap items-center gap-2 bg-slate-800/90 p-1.5 rounded-2xl border border-slate-700/80 shadow-xs">
                 <span className="text-[10px] text-slate-400 font-bold px-1.5 uppercase">設定切替:</span>
                 
-                {/* 重要案件トグルボタン */}
+                {/* 重要案件トグルボタン (薄赤色バックカラー表示) */}
                 <button
                   type="button"
                   onClick={handleToggleImportant}
                   className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center space-x-1.5 border select-none ${
                     shipment.isImportant
-                      ? 'bg-amber-500 text-white border-amber-400 shadow-sm hover:bg-amber-600'
-                      : 'bg-slate-900/80 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-amber-300'
+                      ? 'bg-red-600 text-white border-red-500 shadow-sm hover:bg-red-700 animate-pulse'
+                      : 'bg-slate-900/80 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-red-300'
                   }`}
-                  title="クリックで重要案件の設定を切り替えます"
+                  title="クリックで重要案件（薄赤色バックカラー表示）の設定を切り替えます"
                 >
-                  <Star className={`w-3.5 h-3.5 ${shipment.isImportant ? 'fill-current text-amber-100' : 'text-amber-400'}`} />
+                  <Star className={`w-3.5 h-3.5 ${shipment.isImportant ? 'fill-current text-white' : 'text-red-400'}`} />
                   <span>重要案件 {shipment.isImportant ? '【ON】' : '【OFF】'}</span>
                 </button>
 
@@ -700,6 +747,21 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
                   <Flame className={`w-3.5 h-3.5 ${shipment.isDgCargo ? 'text-amber-300 fill-amber-300/30' : 'text-amber-400'}`} />
                   <span>{shipment.isDgCargo ? 'DG品 (危険物)' : '非DG (一般貨物)'}</span>
                 </button>
+
+                {/* 重量案件トグルボタン (1000kg以上・黄色系バックカラー表示) */}
+                <button
+                  type="button"
+                  onClick={handleToggleHeavyCargo}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center space-x-1.5 border select-none ${
+                    isHeavy
+                      ? 'bg-amber-500 text-white border-amber-400 shadow-sm hover:bg-amber-600 animate-pulse'
+                      : 'bg-slate-900/80 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-amber-400'
+                  }`}
+                  title="クリックで重量案件（1000kg以上・黄色系バックカラー表示）の設定を切り替えます"
+                >
+                  <Scale className={`w-3.5 h-3.5 ${isHeavy ? 'text-white' : 'text-amber-400'}`} />
+                  <span>重量案件 {isHeavy ? '【ON】' : '【OFF】'}</span>
+                </button>
               </div>
             </div>
           </div>
@@ -717,7 +779,10 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
             <div className="border-l border-slate-700 h-6" />
             <div>
               <span className="text-slate-400 block text-[10px]">個数 / 重量</span>
-              <span className="font-mono font-bold text-blue-300">{shipment.pieces || '-'} / {shipment.grossWeight || '-'}</span>
+              <span className={`font-mono font-bold ${isHeavy ? 'text-red-300 bg-red-950/80 px-1.5 py-0.5 rounded border border-red-800' : 'text-blue-300'}`}>
+                {shipment.pieces || '-'} / {shipment.grossWeight || '-'}
+                {isHeavy && <span className="ml-1 text-[9.5px] text-white bg-red-600 px-1 py-0.2 rounded font-black">重量</span>}
+              </span>
             </div>
             <div className="border-l border-slate-700 h-6" />
             <button
@@ -778,14 +843,21 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
               <div>
                 <span className="text-slate-400 text-[11px] block font-medium">個数 (Pieces):</span>
                 <span className="font-bold text-indigo-200 text-[21px] sm:text-[22.5px] font-mono leading-tight block">
-                  {shipment.pieces || (shipment.pkgCount ? `${shipment.pkgCount} 個` : '-')}
+                  {shipment.pieces || ((shipment as any).pkgCount ? `${(shipment as any).pkgCount} 個` : '-')}
                 </span>
               </div>
               <div>
                 <span className="text-slate-400 text-[11px] block font-medium">重量 (Gross Wt):</span>
-                <span className="font-bold text-indigo-200 text-[21px] sm:text-[22.5px] font-mono leading-tight block">
-                  {shipment.grossWeight || (shipment.weight ? `${shipment.weight} kg` : '-')}
-                </span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className={`font-bold text-[21px] sm:text-[22.5px] font-mono leading-tight block ${isHeavy ? 'text-rose-300' : 'text-indigo-200'}`}>
+                    {shipment.grossWeight || ((shipment as any).weight ? `${(shipment as any).weight} kg` : '-')}
+                  </span>
+                  {isHeavy && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-black bg-red-600 text-white rounded border border-red-500 animate-pulse">
+                      重量案件
+                    </span>
+                  )}
+                </div>
               </div>
               <div>
                 <span className="text-slate-400 text-[11px] block font-medium">FLAG (船籍):</span>
@@ -1097,7 +1169,7 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
       </div>
 
       {/* Main Content Tabs: Tasks vs Comments vs Logs */}
-      <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+      <div id="main-tabs-section" className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden scroll-mt-6">
         <div className="border-b border-slate-200 px-6 pt-4 flex justify-between items-center bg-slate-50/50">
           <div className="flex space-x-6 overflow-x-auto">
             <button
@@ -1110,6 +1182,21 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
             >
               <FileCheck className="w-4 h-4" />
               <span>作業タスク工程一覧 ({totalCount})</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('customs_qa')}
+              className={`pb-3 text-xs font-bold border-b-2 transition-all flex items-center space-x-2 shrink-0 cursor-pointer ${
+                activeTab === 'customs_qa'
+                  ? 'border-blue-600 text-blue-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Mail className="w-4 h-4" />
+              <span>通関質疑 ＆ ヘルマン照会ハブ ({shipment.customsQas?.length || 0})</span>
+              {(shipment.customsQas || []).some((q) => q.status !== 'RESOLVED_TO_BROKER') && (
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              )}
             </button>
 
             <button
@@ -1855,6 +1942,16 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
               )}
             </div>
           )}
+
+          {/* CUSTOMS QA & HELLMANN RELAY HUB */}
+          {activeTab === 'customs_qa' && (
+            <CustomsQaRelayPanel
+              shipment={shipment}
+              onShipmentUpdated={() => {
+                refreshData();
+              }}
+            />
+          )}
         </div>
       </div>
       {/* PDF Zoom Modal */}
@@ -1862,6 +1959,10 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
         shipment={shipment}
         isOpen={showZoomModal}
         onClose={() => setShowZoomModal(false)}
+        onReturnToDashboard={() => {
+          setShowZoomModal(false);
+          if (onBack) onBack();
+        }}
         onShipmentUpdated={(updated) => setShipment({ ...updated })}
         onNavigateShipment={(nextShipment) => {
           setShipment(nextShipment);
@@ -2011,6 +2112,99 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
           shipment={shipment}
           onClose={() => setShowEmailModal(false)}
         />
+      )}
+
+      {/* Customs QA Relay Popup Modal */}
+      {showCustomsQaModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-5xl w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] my-auto">
+            {/* Modal Header */}
+            <div className="bg-slate-900 text-white p-4 sm:px-6 flex items-center justify-between border-b border-slate-800 shrink-0">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400/30 flex items-center justify-center text-blue-400 shrink-0">
+                  <MessageSquare className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-bold text-sm sm:text-base text-white">
+                      通関質疑 ＆ ヘルマン照会ハブ
+                    </h3>
+                    {(() => {
+                      const badgeInfo = getCustomsQaStatusBadgeInfo(shipment.customsQas);
+                      return (
+                        <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border flex items-center gap-1 ${badgeInfo.badgeClass}`}>
+                          <span className="text-[9px]">●</span>
+                          <span>{badgeInfo.label}</span>
+                        </span>
+                      );
+                    })()}
+                    <span className="text-[11px] bg-blue-500/20 text-blue-300 font-mono px-2.5 py-0.5 rounded-md border border-blue-400/20">
+                      HAWB: {shipment.hawbNumber || shipment.id}
+                    </span>
+                    <span className="text-[11px] bg-slate-800 text-slate-300 font-mono px-2 py-0.5 rounded-md border border-slate-700">
+                      MAWB: {shipment.mawbNumber}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    共通グループメール経由で社内通関士とヘルマン社を直結リレー
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCustomsQaModal(false);
+                    const el = document.getElementById('main-tabs-section');
+                    if (el) {
+                      setTimeout(() => {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                      }, 50);
+                    }
+                  }}
+                  className="px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer border border-slate-700 hidden sm:flex items-center gap-1.5"
+                  title="ポップアップを閉じて画面下部のタブエリアへ移動します"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+                  <span>ページ内タブへ移動</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCustomsQaModal(false)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+                  title="閉じる"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-slate-50/50">
+              <CustomsQaRelayPanel
+                shipment={shipment}
+                onShipmentUpdated={() => {
+                  refreshData();
+                }}
+              />
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 sm:px-6 bg-white border-t border-slate-200 flex justify-between items-center text-xs text-slate-500">
+              <span>
+                ※ 画面下部の「通関質疑＆ヘルマン照会ハブ」タブでも常時表示・操作可能です
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowCustomsQaModal(false)}
+                className="px-5 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </motion.div>
   );

@@ -42,6 +42,7 @@ import { exportShipmentsToExcel } from '../lib/excelExportService';
 import { GanttChartView } from './GanttChartView';
 import { TableView } from './TableView';
 import { togglePinShipment } from '../lib/storageManager';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
 import { CustomsEmailModal } from './CustomsEmailModal';
 import { DateStatusPieChart } from './DateStatusPieChart';
 import { CustomsClearanceParserModal } from './CustomsClearanceParserModal';
@@ -543,9 +544,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {selectedDateShipments
                     .filter((s) => !!s.cutTime)
-                    .map((s) => (
+                    .map((s, sIdx) => (
                       <button
-                        key={s.id}
+                        key={`${s.id}-${sIdx}`}
                         type="button"
                         onClick={() => onSelectShipment(s)}
                         className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-white/10 hover:bg-white/20 border border-rose-400/60 rounded-lg text-[11px] font-bold text-white transition-all cursor-pointer shadow-xs active:scale-95"
@@ -981,9 +982,12 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                 ? `【ユーザー登録メモ (${memoCount}件)${hasImportantMemo ? ' ★重要メモあり' : ''}】\n最新 (${latestComment?.formattedTime || ''}):\n${latestComment?.authorName ? `[${latestComment.authorName}] ` : ''}${latestComment?.content || ''}`
                 : '';
 
+              const isHeavy = isHeavyShipment(shipment);
+              const isImportant = isImportantShipment(shipment);
+
               return (
                 <motion.div
-                  key={shipment.id}
+                  key={`${shipment.id}-${idx}`}
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.2, delay: idx * 0.05 }}
@@ -991,11 +995,17 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                   onClick={() => onSelectShipment(shipment)}
                   className={`rounded-3xl border cursor-pointer transition-all p-3.5 flex flex-col justify-between space-y-2.5 group ${
                     shipment.isPinned
-                      ? 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/10 shadow-md hover:shadow-xl'
+                      ? isImportant
+                        ? 'border-blue-500 ring-2 ring-blue-400/60 bg-red-100/80 shadow-md hover:shadow-xl'
+                        : isHeavy
+                        ? 'border-blue-500 ring-2 ring-blue-400/60 bg-amber-100/80 shadow-md hover:shadow-xl'
+                        : 'border-blue-500 ring-2 ring-blue-400/50 bg-blue-50/10 shadow-md hover:shadow-xl'
+                      : isImportant
+                      ? 'border-red-400 ring-1 ring-red-400/60 bg-red-50/90 shadow-md hover:border-red-500 hover:shadow-xl hover:bg-red-100/80'
+                      : isHeavy
+                      ? 'border-amber-400 ring-1 ring-amber-300/80 bg-amber-50/90 shadow-xs hover:border-amber-500 hover:shadow-xl hover:bg-amber-100/80'
                       : shipment.isUrgent
                       ? 'border-rose-400 bg-rose-50/10 shadow-md hover:border-rose-500 hover:shadow-xl'
-                      : shipment.isImportant
-                      ? 'border-amber-400 bg-amber-50/10 shadow-md hover:border-amber-500 hover:shadow-xl'
                       : 'border-slate-200 bg-white shadow-xs hover:shadow-xl hover:border-blue-400'
                   }`}
                 >
@@ -1013,6 +1023,21 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                         <span className="px-2.5 py-0.5 text-xs sm:text-[13px] font-black tracking-tight rounded-md bg-blue-950 text-white border border-blue-800 uppercase font-mono shadow-2xs">
                           {shipment.id}
                         </span>
+
+                        {/* 重要案件バッジ (薄赤ハイライト対応) */}
+                        {isImportant && (
+                          <span className="px-2 py-0.5 text-[10px] font-black rounded-lg bg-red-600 text-white shadow-xs flex items-center space-x-1 border border-red-500 animate-pulse">
+                            <Star className="w-3 h-3 fill-current text-white" />
+                            <span>重要案件</span>
+                          </span>
+                        )}
+
+                        {/* 重量案件バッジ (黄色系ハイライト対応) */}
+                        {isHeavy && (
+                          <span className="px-2 py-0.5 text-[10px] font-black rounded-lg bg-amber-500 text-white shadow-xs flex items-center space-x-1 border border-amber-600">
+                            <span>重量案件</span>
+                          </span>
+                        )}
 
                         {/* User Memo / Comment Count Badge */}
                         {memoCount > 0 && (
@@ -1121,10 +1146,17 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                       </span>
                     )}
 
-                    {shipment.isImportant && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-white flex items-center gap-1 shadow-2xs">
+                    {isImportant && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-red-600 text-white flex items-center gap-1 shadow-2xs border border-red-500 animate-pulse">
                         <Star className="w-3 h-3 fill-current shrink-0" />
                         <span>重要案件</span>
+                      </span>
+                    )}
+
+                    {isHeavy && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-white flex items-center gap-1 shadow-2xs border border-amber-600">
+                        <Scale className="w-3 h-3 shrink-0" />
+                        <span>重量案件</span>
                       </span>
                     )}
 

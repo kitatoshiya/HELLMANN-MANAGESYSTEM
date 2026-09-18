@@ -104,9 +104,17 @@ function saveLocalTaskMasters(items: TaskMaster[]): void {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number = 2500): Promise<T> {
+  let timer: any = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('Firestore timeout'));
+    }, ms);
+  });
   return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), ms)),
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    timeoutPromise,
   ]);
 }
 

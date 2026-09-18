@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Shipment, Task, TaskStatus, StatusFilterType } from '../types';
-import { getShipments, subscribeToStore } from '../lib/storageManager';
+import { Shipment, Task, TaskStatus, StatusFilterType, CustomsEmailLog } from '../types';
+import { getShipments, subscribeToStore, getCustomsEmailThreadForShipment } from '../lib/storageManager';
 import { SiDocumentViewer } from './SiDocumentViewer';
 import {
   Search,
@@ -33,6 +33,10 @@ import {
   Receipt,
   Layers,
   Sparkles,
+  Mail,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Paperclip,
 } from 'lucide-react';
 
 const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'];
@@ -69,13 +73,49 @@ export const MobileViewerApp: React.FC = () => {
   const [showShareToast, setShowShareToast] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState<'info' | 'tasks' | 'notes' | 'pdf'>('info');
 
+  // Customs Email Thread State (for active shipment)
+  const [emailThread, setEmailThread] = useState<CustomsEmailLog[]>([]);
+  const [expandedEmailIds, setExpandedEmailIds] = useState<Set<string>>(new Set());
+  const [copiedEmailTextId, setCopiedEmailTextId] = useState<string | null>(null);
+
+  const formatMailDateTime = (isoString?: string) => {
+    if (!isoString) return '-';
+    try {
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return isoString;
+      const now = new Date();
+      const diffMin = Math.round((now.getTime() - d.getTime()) / (60 * 1000));
+      if (diffMin >= 0 && diffMin < 60) {
+        return `${diffMin}分前`;
+      }
+      if (diffMin >= 60 && diffMin < 24 * 60) {
+        return `${Math.floor(diffMin / 60)}時間前`;
+      }
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const h = String(d.getHours()).padStart(2, '0');
+      const min = String(d.getMinutes()).padStart(2, '0');
+      return `${m}/${day} ${h}:${min}`;
+    } catch {
+      return isoString;
+    }
+  };
+
   const todayKey = useMemo(() => formatDateToKey(new Date()), []);
 
   // Subscribe to storage changes for live sync
   useEffect(() => {
     const reload = () => {
-      setShipments(getShipments());
+      const latest = getShipments();
+      setShipments(latest);
       setLastUpdated(new Date());
+      setSelectedShipment((prev) => {
+        if (!prev) return null;
+        const found = latest.find(
+          (s) => s.id === prev.id || (s.mawbNumber && s.mawbNumber === prev.mawbNumber)
+        );
+        return found || prev;
+      });
     };
     reload();
     const unsub = subscribeToStore(() => {
@@ -92,6 +132,42 @@ export const MobileViewerApp: React.FC = () => {
       clearInterval(interval);
     };
   }, []);
+
+  // Fetch updated email thread whenever selectedShipment changes or storage updates
+  useEffect(() => {
+    if (!selectedShipment) {
+      setEmailThread([]);
+      return;
+    }
+    const thread = getCustomsEmailThreadForShipment(selectedShipment);
+    setEmailThread(thread);
+    if (thread.length > 0) {
+      // Default to expand the latest email
+      setExpandedEmailIds(new Set([thread[thread.length - 1].id]));
+    }
+  }, [selectedShipment, lastUpdated]);
+
+  const toggleExpandEmail = (id: string) => {
+    setExpandedEmailIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleCopyEmailContent = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedEmailTextId(id);
+      setTimeout(() => setCopiedEmailTextId(null), 2000);
+    } catch (e) {
+      console.error('Failed to copy', e);
+    }
+  };
 
   const handleManualRefresh = () => {
     setIsRefreshing(true);
@@ -441,9 +517,9 @@ export const MobileViewerApp: React.FC = () => {
             </div>
 
             <div className="flex flex-wrap gap-1.5">
-              {cutTimeShipments.map((s) => (
+              {cutTimeShipments.map((s, idx) => (
                 <button
-                  key={s.id}
+                  key={`${s.id}-${idx}`}
                   type="button"
                   onClick={() => setSelectedShipment(s)}
                   className="inline-flex items-center gap-1.5 px-2 py-1 bg-white/10 hover:bg-white/20 active:scale-95 border border-rose-400/50 rounded-lg text-xs font-bold text-white transition-all cursor-pointer"
@@ -553,14 +629,14 @@ export const MobileViewerApp: React.FC = () => {
               </p>
             </div>
           ) : (
-            displayedShipments.map((s) => {
+            displayedShipments.map((s, idx) => {
               const completedTasks = s.tasks?.filter((t) => t.status === 'Completed').length || 0;
               const totalTasks = s.tasks?.length || 0;
               const taskPercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
               return (
                 <motion.div
-                  key={s.id}
+                  key={`${s.id}-${idx}`}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => setSelectedShipment(s)}
                   className={`bg-slate-950 border rounded-xl p-3.5 space-y-2.5 shadow-sm transition-all cursor-pointer ${
@@ -931,6 +1007,246 @@ export const MobileViewerApp: React.FC = () => {
                         </p>
                       </div>
                     )}
+
+                    {/* Customs Email Thread Section (StorageManager connected) */}
+                    <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 space-y-3">
+                      {/* Thread Header */}
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                        <div className="flex items-center space-x-2">
+                          <div className="w-6 h-6 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center">
+                            <Mail className="w-3.5 h-3.5" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-slate-100 text-xs">通関依頼メール スレッド</span>
+                              {emailThread.length > 0 && (
+                                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-blue-500/20 text-blue-300 font-bold border border-blue-400/30">
+                                  {emailThread.length}通
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-slate-400 block font-mono">
+                              AWB: {(selectedShipment as any).primaryKey || selectedShipment.mawbNumber || selectedShipment.id}
+                            </span>
+                          </div>
+                        </div>
+
+                        {emailThread.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (expandedEmailIds.size === emailThread.length) {
+                                setExpandedEmailIds(new Set());
+                              } else {
+                                setExpandedEmailIds(new Set(emailThread.map((e) => e.id)));
+                              }
+                            }}
+                            className="text-[10px] font-medium text-slate-400 hover:text-slate-200 px-2 py-1 rounded bg-slate-900 border border-slate-800 transition-colors"
+                          >
+                            {expandedEmailIds.size === emailThread.length ? 'すべて折りたたむ' : 'すべて展開'}
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Thread Messages */}
+                      {emailThread.length === 0 ? (
+                        <div className="p-4 text-center text-slate-500 text-[11px] rounded-lg bg-slate-900/50 border border-dashed border-slate-800">
+                          現在この貨物に関連する通関依頼メールログはありません。
+                        </div>
+                      ) : (
+                        <div className="space-y-3 relative before:absolute before:top-3 before:bottom-3 before:left-3.5 before:w-0.5 before:bg-slate-800/80">
+                          {emailThread.map((mail, idx) => {
+                            const isExpanded = expandedEmailIds.has(mail.id);
+                            const isIncoming = mail.direction === 'INCOMING';
+                            const isHellmannOrder = mail.type === 'HELLMANN_ORDER';
+                            const isCustomsReq = mail.type === 'CUSTOMS_REQUEST';
+
+                            let badgeLabel = '通関メール';
+                            let badgeStyle = 'bg-blue-500/10 text-blue-300 border-blue-500/30';
+                            let iconBg = 'bg-blue-600 text-white';
+
+                            if (isHellmannOrder) {
+                              badgeLabel = '📥 ヘルマン通関依頼 (SI送付)';
+                              badgeStyle = 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+                              iconBg = 'bg-emerald-600 text-white';
+                            } else if (isCustomsReq) {
+                              badgeLabel = '📤 輸出通関依頼 (通関士宛)';
+                              badgeStyle = 'bg-blue-500/15 text-blue-300 border-blue-500/30';
+                              iconBg = 'bg-blue-600 text-white';
+                            } else if (mail.type === 'BROKER_QUESTION') {
+                              badgeLabel = '❓ 通関士 質疑';
+                              badgeStyle = 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+                              iconBg = 'bg-amber-600 text-white';
+                            } else if (mail.type === 'CUSTOMS_INQUIRY') {
+                              badgeLabel = '🔄 ヘルマン照会';
+                              badgeStyle = 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30';
+                              iconBg = 'bg-indigo-600 text-white';
+                            } else if (mail.type === 'HELLMANN_ANSWER') {
+                              badgeLabel = '💡 ヘルマン回答';
+                              badgeStyle = 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30';
+                              iconBg = 'bg-cyan-600 text-white';
+                            } else if (mail.type === 'BROKER_REPLY') {
+                              badgeLabel = '✅ 通関士回答完了';
+                              badgeStyle = 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+                              iconBg = 'bg-emerald-600 text-white';
+                            }
+
+                            const dateDisplay = formatMailDateTime(mail.sentOrReceivedAt);
+
+                            return (
+                              <div key={mail.id || idx} className="relative pl-7 text-[11px]">
+                                {/* Timeline node icon */}
+                                <div
+                                  className={`absolute left-1 top-1.5 w-5 h-5 rounded-full flex items-center justify-center text-[10px] ring-4 ring-slate-950 z-10 ${iconBg}`}
+                                >
+                                  {isIncoming ? (
+                                    <ArrowDownLeft className="w-2.5 h-2.5" />
+                                  ) : (
+                                    <ArrowUpRight className="w-2.5 h-2.5" />
+                                  )}
+                                </div>
+
+                                {/* Email Message Card */}
+                                <div
+                                  className={`rounded-xl border transition-colors ${
+                                    isExpanded
+                                      ? 'bg-slate-900 border-slate-700/80 shadow-md'
+                                      : 'bg-slate-900/60 border-slate-800/80 hover:bg-slate-900'
+                                  }`}
+                                >
+                                  {/* Card Header (clickable to toggle) */}
+                                  <div
+                                    onClick={() => toggleExpandEmail(mail.id)}
+                                    className="p-2.5 flex flex-col gap-1.5 cursor-pointer"
+                                  >
+                                    <div className="flex items-center justify-between gap-1">
+                                      <span className={`px-2 py-0.5 rounded-md text-[9.5px] font-bold border ${badgeStyle}`}>
+                                        {badgeLabel}
+                                      </span>
+                                      <span className="text-[10px] text-slate-400 font-mono">
+                                        {dateDisplay}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="font-semibold text-slate-200 text-xs line-clamp-1 leading-snug">
+                                        {mail.subject}
+                                      </div>
+                                      <div className="text-slate-400 p-0.5 shrink-0">
+                                        {isExpanded ? (
+                                          <ChevronUp className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <ChevronDown className="w-3.5 h-3.5" />
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* Sender / Recipient Bar */}
+                                    <div className="flex items-center justify-between text-[10px] text-slate-400 gap-1 overflow-hidden">
+                                      <span className="truncate">
+                                        <span className="text-slate-500">From:</span> {mail.sender.name || mail.sender.email}
+                                      </span>
+                                      <span className="shrink-0 text-slate-500">➔</span>
+                                      <span className="truncate text-right">
+                                        <span className="text-slate-500">To:</span> {Array.isArray(mail.toRecipients) && mail.toRecipients.length > 0 ? mail.toRecipients.join(', ') : (mail.toRecipients || 'グループアドレス')}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {/* Collapsed Preview vs Expanded Full Body */}
+                                  {isExpanded ? (
+                                    <div className="px-2.5 pb-2.5 pt-1 border-t border-slate-800/70 space-y-2 text-[11px] animate-in fade-in duration-100">
+                                      {/* Detailed Addresses */}
+                                      <div className="bg-slate-950/70 p-2 rounded-lg text-[10px] space-y-0.5 text-slate-400 border border-slate-800/60 font-mono">
+                                        <div>
+                                          <span className="text-slate-500">差出人:</span> {mail.sender.name} &lt;{mail.sender.email}&gt;
+                                        </div>
+                                        <div>
+                                          <span className="text-slate-500">宛先:</span> {Array.isArray(mail.toRecipients) && mail.toRecipients.length > 0 ? mail.toRecipients.join(', ') : (mail.toRecipients || '未指定')}
+                                        </div>
+                                        {mail.ccRecipients && (Array.isArray(mail.ccRecipients) ? mail.ccRecipients.length > 0 : !!mail.ccRecipients) && (
+                                          <div>
+                                            <span className="text-slate-500">CC:</span> {Array.isArray(mail.ccRecipients) ? mail.ccRecipients.join(', ') : mail.ccRecipients}
+                                          </div>
+                                        )}
+                                      </div>
+
+                                      {/* Body Text */}
+                                      <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800/80 text-slate-300 font-mono text-[10.5px] whitespace-pre-wrap leading-relaxed select-text">
+                                        {mail.body}
+                                      </div>
+
+                                      {/* Attachments */}
+                                      {mail.attachments && mail.attachments.length > 0 && (
+                                        <div className="space-y-1 pt-1">
+                                          <span className="text-[10px] text-slate-400 flex items-center gap-1 font-bold">
+                                            <Paperclip className="w-3 h-3 text-blue-400" />
+                                            <span>添付書類 ({mail.attachments.length}件):</span>
+                                          </span>
+                                          <div className="flex flex-wrap gap-1.5">
+                                            {mail.attachments.map((att, attIdx) => (
+                                              <div
+                                                key={att.id || attIdx}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  if (att.isPdf && selectedShipment.pdfDataUrl) {
+                                                    setActiveDetailTab('pdf');
+                                                  }
+                                                }}
+                                                className="flex items-center gap-1.5 px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-[10px] text-blue-300 hover:border-blue-500/50 hover:bg-slate-900 transition-colors cursor-pointer"
+                                              >
+                                                <FileText className="w-3 h-3 text-red-400 shrink-0" />
+                                                <span className="truncate max-w-[170px]">{att.fileName}</span>
+                                                {att.sizeBytes && (
+                                                  <span className="text-slate-500 font-mono">
+                                                    ({Math.round(att.sizeBytes / 1024)}KB)
+                                                  </span>
+                                                )}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* Action Buttons: Copy Subject / Copy Body */}
+                                      <div className="flex items-center justify-end gap-1.5 pt-1">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleCopyEmailContent(mail.id, `件名: ${mail.subject}\n\n${mail.body}`);
+                                          }}
+                                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] flex items-center gap-1 transition-colors"
+                                        >
+                                          {copiedEmailTextId === mail.id ? (
+                                            <>
+                                              <Check className="w-3 h-3 text-emerald-400" />
+                                              <span className="text-emerald-300">コピー完了</span>
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Copy className="w-3 h-3" />
+                                              <span>メール内容をコピー</span>
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div
+                                      onClick={() => toggleExpandEmail(mail.id)}
+                                      className="px-2.5 pb-2 text-[10.5px] text-slate-400 line-clamp-1 cursor-pointer font-mono"
+                                    >
+                                      {mail.body.slice(0, 70)}...
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
 
                     {/* Read-Only Notice */}
                     <div className="p-2.5 rounded-lg bg-blue-950/40 border border-blue-800/40 text-slate-400 text-[11px] flex items-center gap-1.5">

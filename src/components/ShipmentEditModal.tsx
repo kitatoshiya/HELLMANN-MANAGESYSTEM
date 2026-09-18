@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Shipment, Operator } from '../types';
 import { updateShipmentFields } from '../lib/storageManager';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
 import { fetchAllOperators } from '../lib/operatorService';
 import {
   X,
@@ -17,6 +18,7 @@ import {
   CheckCircle2,
   Clock,
   Flag,
+  Star,
 } from 'lucide-react';
 
 interface ShipmentEditModalProps {
@@ -41,6 +43,12 @@ export const ShipmentEditModal: React.FC<ShipmentEditModalProps> = ({
   const [portOfLoading, setPortOfLoading] = useState(shipment.portOfLoading || '');
   const [destination, setDestination] = useState(shipment.destination || '');
   const [flag, setFlag] = useState(shipment.flag || '');
+  const [isHeavyCargo, setIsHeavyCargo] = useState<boolean>(() => {
+    return shipment.isHeavyCargo !== undefined ? shipment.isHeavyCargo : isHeavyShipment(shipment);
+  });
+  const [isImportant, setIsImportant] = useState<boolean>(() => {
+    return isImportantShipment(shipment);
+  });
   const [flightRoute, setFlightRoute] = useState(shipment.flightRoute || '');
   const [cutTime, setCutTime] = useState(shipment.cutTime || '');
   const [customsClearanceDate, setCustomsClearanceDate] = useState(shipment.customsClearanceDate || '');
@@ -62,6 +70,8 @@ export const ShipmentEditModal: React.FC<ShipmentEditModalProps> = ({
       setPortOfLoading(shipment.portOfLoading || '');
       setDestination(shipment.destination || '');
       setFlag(shipment.flag || '');
+      setIsHeavyCargo(shipment.isHeavyCargo !== undefined ? shipment.isHeavyCargo : isHeavyShipment(shipment));
+      setIsImportant(isImportantShipment(shipment));
       setFlightRoute(shipment.flightRoute || '');
       setCutTime(shipment.cutTime || '');
       setCustomsClearanceDate(shipment.customsClearanceDate || '');
@@ -101,6 +111,8 @@ export const ShipmentEditModal: React.FC<ShipmentEditModalProps> = ({
       hawbNumber: hawbNumber.trim() ? hawbNumber.trim() : null,
       pieces: pieces.trim() ? pieces.trim() : null,
       grossWeight: grossWeight.trim() ? grossWeight.trim() : null,
+      isHeavyCargo: isHeavyCargo,
+      isImportant: isImportant,
       shipper: shipper.trim(),
       consignee: consignee.trim(),
       portOfLoading: portOfLoading.trim() ? portOfLoading.trim() : null,
@@ -215,6 +227,46 @@ export const ShipmentEditModal: React.FC<ShipmentEditModalProps> = ({
                 onChange={(e) => setGrossWeight(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
+            </div>
+
+            {/* 重要案件設定トグル (薄赤色ハイライト) */}
+            <div className="sm:col-span-2 pt-2 border-t border-slate-700/60 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${isImportant ? 'bg-red-500 animate-pulse' : 'bg-slate-600'}`} />
+                <span className="text-xs font-bold text-slate-300">重要案件 (ダッシュボード薄赤色表示)</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isImportant}
+                  onChange={(e) => setIsImportant(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-600"></div>
+                <span className={`ml-2 text-xs font-black ${isImportant ? 'text-red-400' : 'text-slate-400'}`}>
+                  {isImportant ? '★重要案件 (ON)' : '通常 (OFF)'}
+                </span>
+              </label>
+            </div>
+
+            {/* 重量案件設定トグル (黄色系ハイライト / 1000kg以上) */}
+            <div className="sm:col-span-2 pt-2 border-t border-slate-700/60 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${isHeavyCargo ? 'bg-amber-400 animate-pulse' : 'bg-slate-600'}`} />
+                <span className="text-xs font-bold text-slate-300">重量案件 (1000kg以上・ダッシュボード黄色系表示)</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isHeavyCargo}
+                  onChange={(e) => setIsHeavyCargo(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                <span className={`ml-2 text-xs font-black ${isHeavyCargo ? 'text-amber-400' : 'text-slate-400'}`}>
+                  {isHeavyCargo ? '重量案件 (ON)' : '通常 (OFF)'}
+                </span>
+              </label>
             </div>
           </div>
 

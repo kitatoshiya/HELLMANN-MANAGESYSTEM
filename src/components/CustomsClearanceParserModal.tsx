@@ -285,14 +285,14 @@ export const CustomsClearanceParserModal: React.FC<CustomsClearanceParserModalPr
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {targetShipments.length > 0 ? targetShipments.map(shipment => {
+                    {targetShipments.length > 0 ? targetShipments.map((shipment, idx) => {
                       const matchedFiles = parsedFiles.filter(pf => pf.shipment.id === shipment.id);
                       const isMatched = matchedFiles.length > 0;
                       const allSelected = isMatched && matchedFiles.every(f => f.selected);
                       const someSelected = isMatched && matchedFiles.some(f => f.selected);
                       
                       return (
-                      <tr key={shipment.id} className={`transition-colors ${isMatched ? (someSelected ? 'bg-indigo-50/20' : 'bg-slate-50/50') : 'hover:bg-slate-50 opacity-90'}`}>
+                      <tr key={`${shipment.id}-${idx}`} className={`transition-colors ${isMatched ? (someSelected ? 'bg-indigo-50/20' : 'bg-slate-50/50') : 'hover:bg-slate-50 opacity-90'}`}>
                         <td className="px-2 py-1 text-center">
                           {isMatched ? (
                             <div className="cursor-pointer" onClick={() => toggleShipmentFiles(shipment.id)}>

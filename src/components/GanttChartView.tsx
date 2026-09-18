@@ -27,8 +27,11 @@ import {
   MessageSquare,
   MessageSquareText,
   Sparkles,
+  HelpCircle,
 } from 'lucide-react';
 import { updateTaskStatus, togglePinShipment } from '../lib/storageManager';
+import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
+import { getCustomsQaDashboardBadge } from '../lib/m365EmailService';
 import { PdfZoomModal } from './PdfZoomModal';
 
 interface GanttChartViewProps {
@@ -250,21 +253,30 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
                 // Identify the currently active / ongoing step
                 const currentOngoingTask = shipment.tasks.find((t) => t.status === 'In Progress');
                 const isAllCompleted = shipment.status === 'Completed' || (totalTasks > 0 && completedTasks === totalTasks);
+                const isHeavy = isHeavyShipment(shipment);
+                const isImportant = isImportantShipment(shipment);
+                const qaBadge = getCustomsQaDashboardBadge(shipment.customsQas);
 
                 return (
                   <motion.div
-                    key={shipment.id}
+                    key={`${shipment.id}-${sIdx}`}
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.15, delay: sIdx * 0.03 }}
-                    className={`grid grid-cols-12 p-2.5 sm:p-3 hover:bg-slate-50/80 transition-colors items-center group ${
+                    className={`grid grid-cols-12 p-2.5 sm:p-3 transition-colors items-center group ${
                       shipment.isPinned
-                        ? 'bg-blue-50/30 border-l-4 border-l-blue-600'
+                        ? isImportant
+                          ? 'bg-red-100/80 hover:bg-red-200/70 border-l-4 border-l-blue-600'
+                          : isHeavy
+                          ? 'bg-amber-100/80 hover:bg-amber-200/70 border-l-4 border-l-blue-600'
+                          : 'bg-blue-50/30 hover:bg-slate-50/80 border-l-4 border-l-blue-600'
+                        : isImportant
+                        ? 'bg-red-50/90 hover:bg-red-100/80 border-l-4 border-l-red-500 shadow-2xs'
+                        : isHeavy
+                        ? 'bg-amber-50/90 hover:bg-amber-100/80 border-l-4 border-l-amber-500'
                         : shipment.isUrgent
-                        ? 'bg-rose-50/15'
-                        : shipment.isImportant
-                        ? 'bg-amber-50/15'
-                        : ''
+                        ? 'bg-rose-50/20 hover:bg-slate-50/80'
+                        : 'hover:bg-slate-50/80'
                     }`}
                   >
                     {/* Left Info Column (3 or 4 cols) */}
@@ -284,6 +296,21 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
                         <span className="px-2 py-0.5 text-xs sm:text-[13px] font-black tracking-tight rounded-md bg-blue-950 text-white border border-blue-800 uppercase font-mono shadow-2xs">
                           {shipment.id}
                         </span>
+
+                        {/* 重要案件バッジ (薄赤ハイライト対応) */}
+                        {isImportant && (
+                          <span className="px-1.5 py-0.2 text-[9.5px] font-black bg-red-600 text-white rounded shadow-2xs flex items-center gap-0.5 border border-red-500 animate-pulse">
+                            <Star className="w-2.5 h-2.5 fill-current text-white" />
+                            <span>重要案件</span>
+                          </span>
+                        )}
+
+                        {/* 重量案件バッジ (黄色系ハイライト対応) */}
+                        {isHeavy && (
+                          <span className="px-1.5 py-0.2 text-[9.5px] font-black bg-amber-500 text-white rounded shadow-2xs flex items-center gap-0.5 border border-amber-600">
+                            <span>重量案件</span>
+                          </span>
+                        )}
 
                         <span
                           className={`px-2 py-0.5 text-[10.5px] font-extrabold rounded-full ${
@@ -327,6 +354,17 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
                           >
                             <MessageSquareText className={`w-3 h-3 shrink-0 ${hasImportantMemo ? 'text-white' : 'text-indigo-600'}`} />
                             <span>{hasImportantMemo ? `🔴 重要メモ ${memoCount}件` : `メモ ${memoCount}件`}</span>
+                          </span>
+                        )}
+
+                        {/* Customs QA Badge in Left Card Header */}
+                        {qaBadge && (
+                          <span
+                            className={`px-1.5 py-0.5 text-[9.5px] font-extrabold rounded shadow-2xs flex items-center gap-1 transition-colors border ${qaBadge.badgeClass}`}
+                            title={`【通関質疑ハブ】\n${qaBadge.fullLabel}\nクリックで通関質疑ハブ・案件詳細を開きます`}
+                          >
+                            <HelpCircle className="w-3 h-3 shrink-0" />
+                            <span>{qaBadge.shortLabel}</span>
                           </span>
                         )}
 
@@ -409,8 +447,8 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
                         <div className="text-xs text-slate-400 italic py-2">タスク未登録</div>
                       ) : (
                         <div className="space-y-1.5">
-                          {/* Currently Active Step Banner Header & Memo Alert */}
-                          {(currentOngoingTask || memoCount > 0) && (
+                          {/* Currently Active Step Banner Header & Memo Alert & QA Badge */}
+                          {(currentOngoingTask || memoCount > 0 || qaBadge) && (
                             <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
                               {currentOngoingTask ? (
                                 <div className="flex items-center justify-between bg-amber-50 border border-amber-300 rounded-lg px-2.5 py-0.5 text-xs text-amber-900 font-extrabold shadow-2xs flex-1 min-w-[200px]">
@@ -427,17 +465,39 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
                                 </div>
                               ) : <div />}
 
-                              {memoCount > 0 && (
-                                <div
-                                  className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100/90 rounded-lg px-2.5 py-0.5 text-xs text-indigo-900 font-medium shadow-2xs cursor-pointer transition-colors max-w-full truncate"
-                                  onClick={() => onSelectShipment(shipment)}
-                                  title={memoTooltip}
-                                >
-                                  <MessageSquareText className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                  <span className="font-bold text-indigo-700 shrink-0">メモ ({memoCount}件):</span>
-                                  <span className="truncate text-slate-700 text-[11px]">
-                                    {latestComment?.authorName ? `${latestComment.authorName}: ` : ''}{latestComment?.content || ''}
-                                  </span>
+                              {/* Right items: Memo + Customs QA Badge */}
+                              {(memoCount > 0 || qaBadge) && (
+                                <div className="flex items-center gap-1.5 shrink-0 max-w-full">
+                                  {memoCount > 0 && (
+                                    <div
+                                      className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100/90 rounded-lg px-2.5 py-0.5 text-xs text-indigo-900 font-medium shadow-2xs cursor-pointer transition-colors max-w-full truncate"
+                                      onClick={() => onSelectShipment(shipment)}
+                                      title={memoTooltip}
+                                    >
+                                      <MessageSquareText className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                                      <span className="font-bold text-indigo-700 shrink-0">メモ ({memoCount}件):</span>
+                                      <span className="truncate text-slate-700 text-[11px]">
+                                        {latestComment?.authorName ? `${latestComment.authorName}: ` : ''}{latestComment?.content || ''}
+                                      </span>
+                                    </div>
+                                  )}
+
+                                  {/* Customs QA Status Badge (e.g., ヘルマン照会中) next to Memo display */}
+                                  {qaBadge && (
+                                    <div
+                                      className={`flex items-center space-x-1 px-2.5 py-0.5 rounded-lg text-xs font-black shadow-2xs cursor-pointer transition-colors border ${qaBadge.badgeClass}`}
+                                      onClick={() => onSelectShipment(shipment)}
+                                      title={`【通関質疑ハブ】\n${qaBadge.fullLabel}\nクリックで通関質疑ハブ・案件詳細を開きます`}
+                                    >
+                                      <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                                      <span>{qaBadge.shortLabel}</span>
+                                      {qaBadge.count > 1 && (
+                                        <span className="text-[10px] bg-black/20 px-1.5 py-0.2 rounded font-black ml-0.5">
+                                          {qaBadge.count}件
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -601,6 +661,7 @@ export const GanttChartView: React.FC<GanttChartViewProps> = ({
         shipment={zoomShipment}
         isOpen={!!zoomShipment}
         onClose={() => setZoomShipment(null)}
+        onReturnToDashboard={() => setZoomShipment(null)}
         onShipmentUpdated={(updated) => setZoomShipment(updated)}
       />
     </div>

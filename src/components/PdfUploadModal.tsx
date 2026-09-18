@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { SAMPLE_SI_TEMPLATES, SampleSITemplate } from '../lib/sampleSI';
 import { createShipment, findExistingShipmentByKey, getCurrentUser } from '../lib/storageManager';
 import { fetchAllOperators } from '../lib/operatorService';
 import { fetchAllTaskMasters } from '../lib/taskMasterService';
@@ -8,14 +7,92 @@ import { notifyNewShipmentCreated } from '../lib/notificationService';
 import { useAuth } from '../lib/AuthContext';
 import { FileUp, Sparkles, AlertCircle, CheckCircle, Loader2, ArrowRight, FileText, Check, Hash, Flame, UserCheck, Zap, Layers, AlertTriangle, Star, AlertOctagon } from 'lucide-react';
 import { ParsedSIResult, Operator, TaskMaster, Shipment } from '../types';
+import { linkShipmentToHellmannOrder } from '../lib/m365EmailService';
+import { pdfjsLib, getPdfLoadOptions } from '../lib/pdfWorkerSetup';
+import { normalizeMawbNumber, cleanHawbNumber, cleanOrderNumber, cleanInvoiceNumber, cleanShipperName, cleanConsigneeName, calculatePrimaryKey, formatSpecialNotes, isHeavyShipment } from '../lib/awbUtils';
+
+/**
+ * Client-side text extraction from PDF to optimize Gemini token consumption
+ * Preserves multi-line structure based on PDF text item Y coordinates and EOL flags.
+ */
+async function extractTextFromPdfBase64(base64Data: string): Promise<string | null> {
+  try {
+    const rawData = atob(base64Data.replace(/^data:application\/pdf;base64,/, ''));
+    const bytes = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; i++) {
+      bytes[i] = rawData.charCodeAt(i);
+    }
+    const pdf = await pdfjsLib.getDocument(getPdfLoadOptions(bytes)).promise;
+    let fullText = '';
+    const maxPages = Math.min(pdf.numPages, 3);
+    for (let p = 1; p <= maxPages; p++) {
+      const page = await pdf.getPage(p);
+      const textContent = await page.getTextContent();
+      
+      let lastY: number | null = null;
+      const pageLines: string[] = [];
+      let currentLine: string[] = [];
+
+      for (const item of textContent.items as any[]) {
+        if (!('str' in item)) continue;
+        const y = item.transform ? Math.round(item.transform[5]) : null;
+        
+        // If vertical position difference is significant (> 4 points), start a new line
+        if (lastY !== null && y !== null && Math.abs(y - lastY) > 4) {
+          if (currentLine.length > 0) {
+            pageLines.push(currentLine.join(' ').trim());
+            currentLine = [];
+          }
+        }
+        
+        if (item.str && item.str.trim()) {
+          currentLine.push(item.str.trim());
+        }
+        
+        if (item.hasEOL) {
+          if (currentLine.length > 0) {
+            pageLines.push(currentLine.join(' ').trim());
+            currentLine = [];
+          }
+        }
+        
+        if (y !== null) {
+          lastY = y;
+        }
+      }
+      if (currentLine.length > 0) {
+        pageLines.push(currentLine.join(' ').trim());
+      }
+      
+      const pageText = pageLines.filter((l) => l.length > 0).join('\n');
+      if (pageText.trim()) {
+        fullText += `--- Page ${p} ---\n${pageText}\n`;
+      }
+    }
+    return fullText.trim().length >= 40 ? fullText.trim() : null;
+  } catch (err) {
+    console.warn('[extractTextFromPdfBase64] Client text extraction skipped:', err);
+    return null;
+  }
+}
 
 interface PdfUploadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onShipmentCreated: (shipmentId: string) => void;
+  initialFile?: File | null;
+  initialOrderEmailId?: string | null;
+  initialOrderSubject?: string | null;
 }
 
-export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose, onShipmentCreated }) => {
+export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({
+  isOpen,
+  onClose,
+  onShipmentCreated,
+  initialFile = null,
+  initialOrderEmailId = null,
+  initialOrderSubject = null,
+}) => {
   const { currentOperator, currentUser } = useAuth();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -55,8 +132,14 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
     if (isOpen) {
       resetUploadState();
       loadMastersData();
+
+      // If initial file is passed from Hellmann email, auto-process it immediately!
+      if (initialFile) {
+        setSelectedFile(initialFile);
+        processFile(initialFile);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialFile]);
 
   const loadMastersData = async () => {
     try {
@@ -155,21 +238,22 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
     const rawName = file ? file.name.replace(/\.[^/.]+$/, '') : 'SI_NEW_SHIPMENT';
     // Try to extract potential MAWB / HAWB digits from file name
     const match = rawName.match(/\d{3}[-\s]?\d{4}[-\s]?\d{4}|\d{3}[-\s]?\d{8}/);
-    const inferredMawb = match ? match[0].replace(/\s+/g, '-') : `999-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const inferredMawb = match ? normalizeMawbNumber(match[0]) : '189-04358045';
 
     const fallbackData: ParsedSIResult = {
       mawbNumber: inferredMawb,
       hawbNumber: null,
-      orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
+      orderNumber: '',
       invoiceNumber: `INV-${Date.now().toString().slice(-6)}`,
-      shipper: 'TOKYO ELECTRONICS CO., LTD.',
-      consignee: 'GLOBAL LOGISTICS PARTNERS INC.',
-      portOfLoading: 'NRT',
-      destination: 'LAX',
+      shipper: 'SHINKO CO., LTD.',
+      consignee: 'PT ANDALAN MANIS SEJAHTERA',
+      portOfLoading: 'KIX',
+      destination: 'CGK',
       customsClearanceDate: new Date().toISOString().split('T')[0],
-      flightRoute: 'NH006 / NRT -> LAX',
-      pieces: '5 PKG',
-      grossWeight: '120.0 KGS',
+      flightRoute: 'KIX -> CGK',
+      flag: '',
+      pieces: '2 CARTON',
+      grossWeight: '175.0 KGS',
       specialNotes: file ? `添付PDF (${file.name}) から手動連携取込` : '手動直接登録',
       cutTime: '17:00',
       primaryKey: inferredMawb,
@@ -185,6 +269,19 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
 
     setParsedResult(fallbackData);
     setErrorMessage(null);
+  };
+
+  const handleUpdateParsedField = (field: keyof ParsedSIResult, value: any) => {
+    if (!parsedResult) return;
+    const updated = { ...parsedResult, [field]: value };
+    if (field === 'mawbNumber' || field === 'hawbNumber') {
+      const mawb = field === 'mawbNumber' ? normalizeMawbNumber(value) : parsedResult.mawbNumber;
+      const hawb = field === 'hawbNumber' ? cleanHawbNumber(value) : parsedResult.hawbNumber;
+      updated.mawbNumber = mawb;
+      updated.hawbNumber = hawb;
+      updated.primaryKey = calculatePrimaryKey(hawb, mawb);
+    }
+    setParsedResult(updated);
   };
 
   const processFile = async (file: File) => {
@@ -208,8 +305,16 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
           const base64Data = reader.result as string;
           setUploadedPdfBase64(base64Data);
 
+          // Client-side text extraction (Zero Token Cost, reduces payload token size significantly)
+          setAnalysisStep('PDFテキストレイヤーを抽出中（トークン節約最適化）...');
+          const extractedText = await extractTextFromPdfBase64(base64Data);
+
           if (!hasCache) {
-            setAnalysisStep('Gemini AI にて SI 情報抽出中...');
+            setAnalysisStep(
+              extractedText
+                ? '⚡ テキスト最適化モードで高速AI解析中...'
+                : 'Gemini AI にて SI 情報抽出中...'
+            );
           }
 
           const response = await fetch('/api/parse-pdf', {
@@ -217,6 +322,7 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               pdfBase64: base64Data,
+              textContent: extractedText || undefined,
               fileName: file.name,
               usePositionCache: hasCache,
             }),
@@ -238,7 +344,31 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
                 ? '⚡ 位置情報キャッシュを適用し、処理時間を短縮（0.3秒で解析完了）'
                 : 'JSONデータ構造化 & 位置情報マスター自動保存完了'
             );
-            setParsedResult(data.data);
+
+            const raw = data.data;
+            const normalizedMawb = normalizeMawbNumber(raw.mawbNumber);
+            const cleanedHawb = cleanHawbNumber(raw.hawbNumber);
+            const cleanedOrder = cleanOrderNumber(raw.orderNumber, cleanedHawb);
+            const cleanedInvoice = cleanInvoiceNumber(raw.invoiceNumber, extractedText || undefined);
+            const cleanedShipper = cleanShipperName(raw.shipper, extractedText || undefined);
+            const cleanedConsignee = cleanConsigneeName(raw.consignee, extractedText || undefined);
+            const formattedSpecialNotes = formatSpecialNotes(raw.specialNotes, extractedText || undefined);
+            const pk = calculatePrimaryKey(cleanedHawb, normalizedMawb);
+
+            const sanitized: ParsedSIResult = {
+              ...raw,
+              mawbNumber: normalizedMawb,
+              hawbNumber: cleanedHawb,
+              orderNumber: cleanedOrder,
+              invoiceNumber: cleanedInvoice,
+              flag: '', // FLAGはPDFに存在しないため常に初期値は空白
+              shipper: cleanedShipper,
+              consignee: cleanedConsignee,
+              specialNotes: formattedSpecialNotes,
+              primaryKey: pk,
+            };
+
+            setParsedResult(sanitized);
 
             // Save position info template for future fast import
             try {
@@ -261,7 +391,7 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
           }
         } catch (err: any) {
           console.error('[PdfUploadModal] File processing error:', err);
-          setErrorMessage(err.message || 'PDF解析エラーが発生しました。サンプルデータをお試しください。');
+          setErrorMessage(err.message || 'PDF解析エラーが発生しました。再度PDFをアップロードするか手動登録をお試しください。');
         } finally {
           setIsAnalyzing(false);
         }
@@ -271,50 +401,8 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
       };
     } catch (err: any) {
       console.error(err);
-      setErrorMessage(err.message || 'PDF解析エラーが発生しました。サンプルデータをお試しください。');
+      setErrorMessage(err.message || 'PDF解析エラーが発生しました。再度PDFをアップロードするか手動登録をお試しください。');
       setIsAnalyzing(false);
-    }
-  };
-
-  // Run Sample SI Template Parsing instantly
-  const handleSelectSample = async (template: SampleSITemplate) => {
-    setIsAnalyzing(true);
-    setErrorMessage(null);
-    setParsedResult(null);
-    setUploadedPdfBase64(null);
-
-    const hasCache = positionInfoSaved || usedPositionTemplate;
-    setAnalysisStep(
-      hasCache
-        ? `⚡ 位置情報座標を適用中: サンプル指示書 (${template.name}) を高速抽出中...`
-        : `サンプル指示書 (${template.name}) を読み込み中...`
-    );
-
-    try {
-      // First try real Gemini API backend parsing on text content
-      const response = await fetch('/api/parse-pdf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          textContent: template.sampleText,
-          usePositionCache: hasCache,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success && data.data) {
-        setAnalysisStep('⚡ 保存済み位置情報モデルを適用し、超高速取り込み完了');
-        setParsedResult(data.data);
-      } else {
-        // Fallback to template pre-parsed result
-        setParsedResult(template.parsedResult);
-      }
-    } catch {
-      // Fallback to sample template parsed result directly
-      setParsedResult(template.parsedResult);
-    } finally {
-      setIsAnalyzing(false);
-      setUsedPositionTemplate(true);
     }
   };
 
@@ -347,6 +435,7 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
       hawbNumber: parsedResult.hawbNumber,
       orderNumber: parsedResult.orderNumber,
       invoiceNumber: parsedResult.invoiceNumber,
+      flag: parsedResult.flag && parsedResult.flag.trim() ? parsedResult.flag.trim() : null,
       shipper: parsedResult.shipper,
       consignee: parsedResult.consignee,
       portOfLoading: parsedResult.portOfLoading,
@@ -356,6 +445,7 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
       cutTime: parsedResult.cutTime,
       pieces: parsedResult.pieces,
       grossWeight: parsedResult.grossWeight,
+      isHeavyCargo: isHeavyShipment(parsedResult as any),
       specialNotes: parsedResult.specialNotes,
       initialTasks: initialTasks.length > 0 ? initialTasks : undefined,
       isDgCargo,
@@ -366,6 +456,16 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
     });
 
     const newId = newShipment.id;
+
+    // Link Hellmann email thread if originating from Hellmann email
+    if (initialOrderEmailId) {
+      try {
+        linkShipmentToHellmannOrder(newId, initialOrderEmailId);
+      } catch (err) {
+        console.warn('Failed to link Hellmann order thread:', err);
+      }
+    }
+
     // Trigger success toast if enabled in system settings
     notifyNewShipmentCreated(newShipment, (id) => onShipmentCreated(id));
     resetUploadState();
@@ -374,70 +474,74 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-3xl max-w-2xl w-full shadow-2xl overflow-hidden my-8 animate-in fade-in zoom-in-95 duration-150">
-        {/* Header */}
-        <div className="bg-slate-900 text-white p-6 flex justify-between items-start">
+    <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-50 p-2 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-2xl max-w-3xl w-full max-h-[94vh] flex flex-col shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
+        {/* Header (Compact) */}
+        <div className="bg-slate-900 text-white px-5 py-3 flex justify-between items-center shrink-0">
           <div>
             <div className="flex items-center space-x-2">
-              <Sparkles className="w-5 h-5 text-blue-400" />
-              <h2 className="text-lg font-bold">Shipping Instruction (SI) PDF 取り込み</h2>
+              <Sparkles className="w-4 h-4 text-blue-400" />
+              <h2 className="text-base font-bold">Shipping Instruction (SI) PDF 取り込み</h2>
             </div>
-            <p className="text-xs text-slate-400 mt-1">
-              Gemini 3.6 Flash AI が PDF を自動解析し、要件定義に従って HAWB/MAWB キーを判定・案件を登録します。
-            </p>
+            {initialOrderSubject ? (
+              <div className="mt-1 inline-flex items-center gap-1.5 px-2 py-0.5 bg-blue-900/60 text-blue-200 border border-blue-700/50 rounded text-[10px] font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                <span className="font-bold text-white">通関依頼メール連携:</span>
+                <span className="truncate max-w-[280px]">{initialOrderSubject}</span>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Gemini AI が PDF を自動解析し、要件定義に従って HAWB/MAWB キーを自動判定します。
+              </p>
+            )}
           </div>
-          <button onClick={handleCancelClose} className="text-slate-400 hover:text-white font-bold text-base cursor-pointer">
+          <button onClick={handleCancelClose} className="text-slate-400 hover:text-white font-bold text-base cursor-pointer p-1">
             ✕
           </button>
         </div>
 
-        <div className="p-6 space-y-6">
-          {/* Import Settings Bar: DG/Non-DG Cargo & Operator Selection & Priority Flags */}
-          <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+        <div className="p-3.5 space-y-2.5 overflow-y-auto max-h-[calc(94vh-110px)]">
+          {/* Import Settings Bar (Compact 3-column / inline layout) */}
+          <div className="bg-slate-50 p-2 rounded-xl border border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs items-center">
             {/* DG Setting */}
-            <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1.5 flex items-center">
-                <Flame className={`w-3.5 h-3.5 mr-1 ${isDgCargo ? 'text-amber-500' : 'text-slate-400'}`} />
-                <span>貨物種別 (DG設定):</span>
-              </label>
-              <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-200/70 rounded-xl">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-bold text-slate-700 whitespace-nowrap flex items-center shrink-0">
+                <Flame className={`w-3.5 h-3.5 mr-0.5 ${isDgCargo ? 'text-amber-500' : 'text-slate-400'}`} />
+                種別:
+              </span>
+              <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-200/80 rounded-lg w-full">
                 <button
                   type="button"
                   onClick={() => setIsDgCargo(false)}
-                  className={`py-1.5 px-2 rounded-lg font-bold text-center transition-all cursor-pointer ${
-                    !isDgCargo
-                      ? 'bg-white text-slate-800 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800'
+                  className={`py-1 px-1.5 rounded-md font-bold text-[11px] text-center transition-all cursor-pointer ${
+                    !isDgCargo ? 'bg-white text-slate-800 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  非DG (普通品)
+                  非DG(普通)
                 </button>
                 <button
                   type="button"
                   onClick={() => setIsDgCargo(true)}
-                  className={`py-1.5 px-2 rounded-lg font-bold text-center transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                    isDgCargo
-                      ? 'bg-amber-500 text-white shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800'
+                  className={`py-1 px-1.5 rounded-md font-bold text-[11px] text-center transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                    isDgCargo ? 'bg-amber-500 text-white shadow-2xs' : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
                   <Flame className="w-3 h-3" />
-                  <span>DG (危険物)</span>
+                  <span>DG(危険物)</span>
                 </button>
               </div>
             </div>
 
             {/* Operator Selection */}
-            <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1.5 flex items-center">
-                <UserCheck className="w-3.5 h-3.5 mr-1 text-blue-600" />
-                <span>担当者設定 (担当者マスタより):</span>
-              </label>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-bold text-slate-700 whitespace-nowrap flex items-center shrink-0">
+                <UserCheck className="w-3.5 h-3.5 mr-0.5 text-blue-600" />
+                担当者:
+              </span>
               <select
                 value={selectedOperatorEmail}
                 onChange={(e) => setSelectedOperatorEmail(e.target.value)}
-                className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1 text-slate-800 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
               >
                 <option value="">(担当者未指定)</option>
                 {operatorsList.map((op) => (
@@ -448,38 +552,32 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
               </select>
             </div>
 
-            {/* Priority Flags: Important & Urgent */}
-            <div className="col-span-1 sm:col-span-2 pt-2 border-t border-slate-200/80">
-              <label className="block text-[11px] font-bold text-slate-700 mb-1.5 flex items-center">
-                <AlertOctagon className="w-3.5 h-3.5 mr-1 text-rose-600" />
-                <span>案件優先度フラグ (ダッシュボード警告表示 & 最優先表示):</span>
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsImportant(!isImportant)}
-                  className={`py-1.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center space-x-1.5 transition-all cursor-pointer border ${
-                    isImportant
-                      ? 'bg-amber-500 text-white border-amber-600 shadow-xs'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-amber-300 hover:text-amber-700'
-                  }`}
-                >
-                  <Star className={`w-3.5 h-3.5 ${isImportant ? 'fill-current text-amber-100' : 'text-amber-500'}`} />
-                  <span>重要案件 {isImportant ? '【設定ON】' : '【OFF】'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsUrgent(!isUrgent)}
-                  className={`py-1.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center space-x-1.5 transition-all cursor-pointer border ${
-                    isUrgent
-                      ? 'bg-rose-600 text-white border-rose-700 shadow-xs animate-pulse'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-rose-300 hover:text-rose-700'
-                  }`}
-                >
-                  <Zap className={`w-3.5 h-3.5 ${isUrgent ? 'fill-current text-rose-100' : 'text-rose-600'}`} />
-                  <span>緊急案件 {isUrgent ? '【設定ON】' : '【OFF】'}</span>
-                </button>
-              </div>
+            {/* Priority Flags */}
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setIsImportant(!isImportant)}
+                className={`flex-1 py-1 px-2 rounded-lg font-bold text-[11px] flex items-center justify-center gap-1 transition-all cursor-pointer border ${
+                  isImportant
+                    ? 'bg-amber-500 text-white border-amber-600 shadow-2xs'
+                    : 'bg-white text-slate-600 border-slate-200 hover:border-amber-300 hover:text-amber-700'
+                }`}
+              >
+                <Star className={`w-3 h-3 ${isImportant ? 'fill-current text-amber-100' : 'text-amber-500'}`} />
+                <span>重要 {isImportant ? 'ON' : 'OFF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsUrgent(!isUrgent)}
+                className={`flex-1 py-1 px-2 rounded-lg font-bold text-[11px] flex items-center justify-center gap-1 transition-all cursor-pointer border ${
+                  isUrgent
+                    ? 'bg-rose-600 text-white border-rose-700 shadow-2xs animate-pulse'
+                    : 'bg-white text-slate-600 border-slate-200 hover:border-rose-300 hover:text-rose-700'
+                }`}
+              >
+                <Zap className={`w-3 h-3 ${isUrgent ? 'fill-current text-rose-100' : 'text-rose-600'}`} />
+                <span>緊急 {isUrgent ? 'ON' : 'OFF'}</span>
+              </button>
             </div>
           </div>
 
@@ -508,7 +606,7 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
                 onDragOver={handleDrag}
                 onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all ${
                   dragActive ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-slate-50/50'
                 }`}
               >
@@ -519,42 +617,11 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
                   onChange={handleFileChange}
                   className="hidden"
                 />
-                <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center mx-auto mb-3 shadow-xs">
-                  <FileUp className="w-6 h-6" />
+                <div className="w-14 h-14 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center mx-auto mb-3 shadow-xs">
+                  <FileUp className="w-7 h-7" />
                 </div>
-                <p className="text-xs font-bold text-slate-800">ここに SI (PDF) ファイルをドロップ</p>
-                <p className="text-[11px] text-slate-500 mt-1">またはクリックしてパソコンから選択 (.pdf)</p>
-              </div>
-
-              {/* Sample SI Preset Parser section */}
-              <div className="mt-6 pt-5 border-t border-slate-200">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs font-bold text-slate-700 flex items-center">
-                    <Sparkles className="w-3.5 h-3.5 text-blue-600 mr-1.5" />
-                    サンプルSI指示書データで即時テスト解析
-                  </span>
-                  <span className="text-[11px] text-slate-400">PDF不要・ワンクリック実行</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2.5">
-                  {SAMPLE_SI_TEMPLATES.map((tmpl) => (
-                    <button
-                      key={tmpl.id}
-                      onClick={() => handleSelectSample(tmpl)}
-                      className="text-left p-3 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/30 transition-all flex justify-between items-center group"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-slate-800 group-hover:text-blue-700 flex items-center">
-                          <FileText className="w-3.5 h-3.5 mr-1.5 text-slate-400 group-hover:text-blue-600" />
-                          {tmpl.name}
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">{tmpl.description}</div>
-                      </div>
-                      <span className="px-2.5 py-1 bg-blue-600 text-white rounded-lg text-[11px] font-semibold opacity-0 group-hover:opacity-100 transition-opacity flex items-center">
-                        解析実行 <ArrowRight className="w-3 h-3 ml-1" />
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                <p className="text-sm font-bold text-slate-800">ここに Shipping Instruction (PDF) ファイルをドロップ</p>
+                <p className="text-xs text-slate-500 mt-1.5">またはクリックしてパソコンから選択 (.pdf)</p>
               </div>
             </div>
           )}
@@ -607,164 +674,250 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
 
           {/* Extracted Preview & Primary Key Rules Confirmation */}
           {parsedResult && !isAnalyzing && (
-            <div className="space-y-4 animate-in fade-in duration-200">
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-between text-emerald-800 text-xs">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600" />
-                  <span className="font-bold">SIデータの自動抽出および要件定義判定が完了しました</span>
-                </div>
-                <span className="text-[10px] bg-emerald-200/60 text-emerald-900 font-mono px-2 py-0.5 rounded">
-                  Gemini Flash
-                </span>
-              </div>
-
+            <div className="space-y-2.5 animate-in fade-in duration-200">
               {/* Duplicate Shipment Warning Banner (Requirement 2) */}
               {existingShipment && (
-                <div className="p-4 bg-amber-50 border-2 border-amber-400 rounded-2xl shadow-sm text-slate-900 space-y-2.5 animate-in fade-in duration-200">
-                  <div className="flex items-center space-x-2 text-amber-900">
-                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
-                    <h4 className="font-bold text-sm">【既に取り込み済みの案件キーを検出】</h4>
+                <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl shadow-2xs text-slate-900 space-y-1.5 animate-in fade-in duration-200">
+                  <div className="flex items-center space-x-1.5 text-amber-900">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <h4 className="font-bold text-xs">【既に取り込み済みの案件キーを検出】</h4>
                   </div>
-                  <div className="text-xs text-amber-900 leading-relaxed font-medium">
-                    管理キー <strong className="font-mono bg-amber-200 px-1.5 py-0.5 rounded text-amber-950 font-bold">{existingShipment.id}</strong> ({existingShipment.hawbNumber ? `HAWB: ${existingShipment.hawbNumber}` : `MAWB: ${existingShipment.mawbNumber}`}) は既に登録されています。
-                    <br />
-                    <span className="text-slate-700">（登録済案件: {existingShipment.shipper} → {existingShipment.consignee} / 進捗: {existingShipment.status}）</span>
-                  </div>
-
-                  <div className="bg-white/90 border border-amber-300 p-3 rounded-xl text-xs space-y-1">
-                    <div className="font-bold text-amber-950">取り込み処理の指示を選択してください:</div>
-                    <ul className="list-disc list-inside text-[11px] text-amber-900 space-y-0.5 font-medium">
-                      <li><strong>上書き更新:</strong> 最新のPDF抽出データおよび工程タスクマスタで既存案件を上書きします。</li>
-                      <li><strong>取り込みを行わない:</strong> 取り込みを中止し、既存データをそのまま保護します。</li>
-                    </ul>
+                  <div className="text-[11px] text-amber-900 leading-normal font-medium">
+                    管理キー <strong className="font-mono bg-amber-200/80 px-1 py-0.5 rounded text-amber-950 font-bold">{existingShipment.id}</strong> ({existingShipment.hawbNumber ? `HAWB: ${existingShipment.hawbNumber}` : `MAWB: ${existingShipment.mawbNumber}`}) は既に登録されています。
+                    <span className="text-slate-600 ml-1">（{existingShipment.shipper} → {existingShipment.consignee} / {existingShipment.status}）</span>
                   </div>
                 </div>
               )}
 
-              {/* Primary Key Rule Highlight */}
-              <div className="p-4 bg-slate-900 text-white rounded-2xl shadow-md border border-slate-800">
-                <div className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider mb-1 flex items-center">
-                  <Hash className="w-3.5 h-3.5 mr-1" /> 要件定義 3項: プライマリキー（管理ID）自動決定
+              {/* Primary Key Rule Highlight (Compact 1-row bar) */}
+              <div className="px-3 py-1.5 bg-slate-900 text-white rounded-xl flex items-center justify-between shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider flex items-center shrink-0">
+                    <Hash className="w-3.5 h-3.5 mr-0.5" /> 管理ID:
+                  </span>
+                  <span className="text-sm font-bold text-white font-mono tracking-wide">{parsedResult.primaryKey}</span>
+                  <span className="text-[10px] text-slate-400 hidden sm:inline">
+                    ({parsedResult.hawbNumber ? '✔ HAWB優先キー' : '✔ MAWB直截キー'})
+                  </span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-lg font-bold text-white font-mono">{parsedResult.primaryKey}</div>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      {parsedResult.hawbNumber ? (
-                        <span className="text-blue-300">✔ HAWBが存在するため、HAWBを管理ID（完全一意キー）として採用</span>
-                      ) : (
-                        <span className="text-indigo-300">✔ HAWBが未記載のため、MAWBを管理IDとして採用（直截マスター）</span>
-                      )}
+                <span className="px-2 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded">
+                  {parsedResult.hawbNumber ? 'HAWB優先キー' : 'MAWB直截キー'}
+                </span>
+              </div>
+
+              {/* Extracted Fields Grid (Compact Inline Key-Value Rows) */}
+              <div className="text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-1.5">
+                <div className="flex items-center justify-between pb-1 border-b border-slate-200">
+                  <span className="font-bold text-slate-800 text-[11px] flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-blue-600" />
+                    抽出データ確認（必要に応じて直接修正可能）
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium">※ HAWB/MAWB修正時は管理IDが自動再計算されます</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-x-2.5 gap-y-1.5">
+                  {/* Row 1: MAWB & HAWB & 通関日/仕立日 (3 columns) */}
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">MAWB番号:</span>
+                    <input
+                      type="text"
+                      value={parsedResult.mawbNumber}
+                      onChange={(e) => handleUpdateParsedField('mawbNumber', e.target.value)}
+                      className="w-full font-bold font-mono text-slate-900 bg-transparent text-xs outline-none"
+                      placeholder="189-04358045"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">HAWB番号:</span>
+                    <input
+                      type="text"
+                      placeholder="なし (直截マスター)"
+                      value={parsedResult.hawbNumber || ''}
+                      onChange={(e) => handleUpdateParsedField('hawbNumber', e.target.value)}
+                      className="w-full font-bold font-mono text-slate-900 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">通関日 / 仕立日:</span>
+                    <input
+                      type="text"
+                      value={parsedResult.customsClearanceDate}
+                      onChange={(e) => handleUpdateParsedField('customsClearanceDate', e.target.value)}
+                      className="w-full font-semibold text-slate-800 bg-transparent text-xs outline-none font-mono"
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </div>
+
+                  {/* Row 2: POL & DEST & フライト/ルート (3 columns) */}
+                  <div className="sm:col-span-2 bg-indigo-50/60 px-2 py-1 rounded-lg border border-indigo-200/70 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-indigo-900 text-[10px] font-bold whitespace-nowrap shrink-0">積地 (POL):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.portOfLoading || ''}
+                      onChange={(e) => handleUpdateParsedField('portOfLoading', e.target.value)}
+                      className="w-full font-bold font-mono text-indigo-950 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-indigo-50/60 px-2 py-1 rounded-lg border border-indigo-200/70 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-indigo-900 text-[10px] font-bold whitespace-nowrap shrink-0">向地(DEST):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.destination || ''}
+                      onChange={(e) => handleUpdateParsedField('destination', e.target.value)}
+                      className="w-full font-bold font-mono text-indigo-950 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-indigo-50/60 px-2 py-1 rounded-lg border border-indigo-200/70 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-indigo-900 text-[10px] font-bold whitespace-nowrap shrink-0">フライト / ルート:</span>
+                    <input
+                      type="text"
+                      value={parsedResult.flightRoute}
+                      onChange={(e) => handleUpdateParsedField('flightRoute', e.target.value)}
+                      className="w-full font-bold text-indigo-950 bg-transparent text-xs outline-none"
+                      placeholder="KIX -> PVG"
+                    />
+                  </div>
+
+                  {/* Row 3: INVOICE NO. & ORDER NO. & FLAG (3 columns) */}
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">INVOICE NO.:</span>
+                    <input
+                      type="text"
+                      value={parsedResult.invoiceNumber}
+                      onChange={(e) => handleUpdateParsedField('invoiceNumber', e.target.value)}
+                      className="w-full font-semibold text-slate-800 bg-transparent text-xs outline-none"
+                      placeholder="未設定 (空欄)"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">受注 / 特記NO.:</span>
+                    <input
+                      type="text"
+                      placeholder="受注NO.なし (空欄)"
+                      value={parsedResult.orderNumber}
+                      onChange={(e) => handleUpdateParsedField('orderNumber', e.target.value)}
+                      className="w-full font-medium text-slate-800 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">FLAG:</span>
+                    <input
+                      type="text"
+                      placeholder="未設定 (空欄)"
+                      value={parsedResult.flag || ''}
+                      onChange={(e) => handleUpdateParsedField('flag', e.target.value)}
+                      className="w-full font-medium text-slate-800 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  {/* Row 4: Pieces & Gross Weight (2 columns) */}
+                  <div className="sm:col-span-3 bg-blue-50/60 px-2 py-1 rounded-lg border border-blue-200/70 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-blue-900 text-[10px] font-bold whitespace-nowrap shrink-0">個数 (Pieces):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.pieces || ''}
+                      onChange={(e) => handleUpdateParsedField('pieces', e.target.value)}
+                      className="w-full font-bold text-blue-950 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className={`sm:col-span-3 px-2 py-1 rounded-lg border focus-within:ring-1 flex items-center gap-1.5 shadow-2xs ${
+                    isHeavyShipment(parsedResult as any)
+                      ? 'bg-red-50 border-red-300 focus-within:border-red-500 focus-within:ring-red-100'
+                      : 'bg-blue-50/60 border-blue-200/70 focus-within:border-blue-400 focus-within:ring-blue-100'
+                  }`}>
+                    <span className={`text-[10px] font-bold whitespace-nowrap shrink-0 ${
+                      isHeavyShipment(parsedResult as any) ? 'text-red-900' : 'text-blue-900'
+                    }`}>重量 (Gross Wt):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.grossWeight || ''}
+                      onChange={(e) => handleUpdateParsedField('grossWeight', e.target.value)}
+                      className="w-full font-bold text-slate-950 bg-transparent text-xs outline-none"
+                    />
+                    {isHeavyShipment(parsedResult as any) && (
+                      <span className="px-1.5 py-0.5 text-[9.5px] font-black bg-red-600 text-white rounded shrink-0 shadow-2xs border border-red-500 animate-pulse">
+                        重量案件 (薄赤背景)
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Row 5: Shipper & Consignee (2 columns) */}
+                  <div className="sm:col-span-3 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">Shipper (荷主):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.shipper}
+                      onChange={(e) => handleUpdateParsedField('shipper', e.target.value)}
+                      className="w-full font-medium text-slate-900 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-3 bg-white px-2 py-1 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex items-center gap-1.5 shadow-2xs">
+                    <span className="text-slate-500 text-[10px] font-semibold whitespace-nowrap shrink-0">Consignee (荷受人):</span>
+                    <input
+                      type="text"
+                      value={parsedResult.consignee}
+                      onChange={(e) => handleUpdateParsedField('consignee', e.target.value)}
+                      className="w-full font-medium text-slate-900 bg-transparent text-xs outline-none"
+                    />
+                  </div>
+
+                  {/* Row 6: Special Notes (5-row scrollable textarea, full width) */}
+                  <div className="col-span-1 sm:col-span-6 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-100 flex flex-col gap-1 shadow-2xs">
+                    <div className="flex items-center justify-between text-slate-500 text-[10px] font-semibold">
+                      <span className="flex items-center gap-1">
+                        <FileText className="w-3 h-3 text-slate-400" />
+                        特記事項（5行表示・縦スクロール可）:
+                      </span>
+                      <span className="text-[9px] text-slate-400">改行・直接編集可能</span>
                     </div>
-                  </div>
-                  <span className="px-3 py-1 bg-blue-600 text-white text-xs font-bold rounded-lg shadow-xs">
-                    {parsedResult.hawbNumber ? 'HAWB優先キー' : 'MAWB直截キー'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Extracted Fields Grid (Compact Side-by-Side Layout) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">MAWB番号:</span>
-                  <span className="font-bold font-mono text-slate-900">{parsedResult.mawbNumber}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">HAWB番号:</span>
-                  <span className="font-bold font-mono text-slate-900">{parsedResult.hawbNumber || 'なし (直截)'}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">INVOICE NO.:</span>
-                  <span className="font-semibold text-slate-800">{parsedResult.invoiceNumber}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">受注 / 特記事項NO.:</span>
-                  <span className="font-semibold text-slate-800">{parsedResult.orderNumber}</span>
-                </div>
-
-                {/* Extracted Fields: Port of Loading & Destination (向地(DEST)) */}
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/60">
-                  <span className="text-indigo-900 text-[11px] font-bold">積地:</span>
-                  <span className="font-bold font-mono text-indigo-950">{parsedResult.portOfLoading || '未設定'}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/60">
-                  <span className="text-indigo-900 text-[11px] font-bold">向地(DEST):</span>
-                  <span className="font-bold font-mono text-indigo-950">{parsedResult.destination || '未設定'}</span>
-                </div>
-
-                {/* Newly Added Extracted Fields: Pieces & Gross Weight */}
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1 bg-blue-50/70 px-2 py-0.5 rounded-lg border border-blue-200/60">
-                  <span className="text-blue-900 text-[11px] font-bold">個数 (No.of Pieces RCP):</span>
-                  <span className="font-bold font-mono text-blue-950">{parsedResult.pieces || '未記載'}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1 bg-blue-50/70 px-2 py-0.5 rounded-lg border border-blue-200/60">
-                  <span className="text-blue-900 text-[11px] font-bold">重量 (Gross Weight):</span>
-                  <span className="font-bold font-mono text-blue-950">{parsedResult.grossWeight || '未記載'}</span>
-                </div>
-
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">Shipper (荷主):</span>
-                  <span className="font-semibold text-slate-900 truncate max-w-[180px]" title={parsedResult.shipper}>{parsedResult.shipper}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">Consignee (荷受人):</span>
-                  <span className="font-semibold text-slate-900 truncate max-w-[180px]" title={parsedResult.consignee}>{parsedResult.consignee}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">フライト / ルート:</span>
-                  <span className="font-medium text-slate-800">{parsedResult.flightRoute}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">カット時間:</span>
-                  <span className="font-medium text-slate-800">{parsedResult.cutTime || 'カット時間なし'}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">通関日 / 仕立日:</span>
-                  <span className="font-medium text-slate-800">{parsedResult.customsClearanceDate}</span>
-                </div>
-                <div className="flex items-center justify-between border-b border-slate-200/60 pb-1">
-                  <span className="text-slate-500 text-[11px] font-semibold">FLAG (船籍):</span>
-                  <span className="font-mono text-slate-500">{parsedResult.flag || ' '}</span>
-                </div>
-
-                {/* Special Notes / Remarks (Multi-line) */}
-                <div className="col-span-1 sm:col-span-2 pt-1">
-                  <span className="text-slate-500 text-[11px] font-semibold block mb-0.5">特記事項 (複数行数):</span>
-                  <div className="bg-white p-2 rounded-xl border border-slate-200 text-slate-800 text-[11px] font-mono whitespace-pre-wrap max-h-20 overflow-y-auto">
-                    {parsedResult.specialNotes || '特記事項なし'}
+                    <textarea
+                      rows={5}
+                      value={parsedResult.specialNotes || ''}
+                      onChange={(e) => handleUpdateParsedField('specialNotes', e.target.value)}
+                      className="w-full font-mono text-slate-800 bg-transparent text-[11px] outline-none resize-y overflow-y-auto leading-relaxed h-[5.5rem] border-t border-slate-100 pt-1"
+                      placeholder="特記事項なし"
+                    />
                   </div>
                 </div>
               </div>
 
-              {/* Suggested Tasks reflected directly from Task Master (Requirement 4) */}
+              {/* Suggested Tasks reflected directly from Task Master (Compact List) */}
               <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-slate-700 block">
-                    初期反映作業工程タスク（作業工程タスクマスタにより判定・生成）:
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[11px] font-bold text-slate-700 block">
+                    初期反映作業工程タスク（マスタ自動判定）:
                   </span>
-                  <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-2 py-0.5 rounded border border-indigo-200">
-                    マスタ判定: {filteredTaskMasters.length}件
+                  <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-1.5 py-0.2 rounded border border-indigo-200">
+                    {filteredTaskMasters.length}件
                   </span>
                 </div>
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                <div className="space-y-1 max-h-24 overflow-y-auto pr-1">
                   {filteredTaskMasters.map((tm) => (
                     <div
                       key={tm.id}
-                      className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg flex items-center justify-between text-slate-700"
+                      className="text-[11px] px-2.5 py-1 bg-white border border-slate-200 rounded-lg flex items-center justify-between text-slate-700"
                     >
-                      <div className="flex items-center space-x-2">
-                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold flex items-center justify-center shrink-0">
-                          №{tm.orderNumber}
+                      <div className="flex items-center space-x-1.5">
+                        <span className="w-4 h-4 rounded-full bg-blue-100 text-blue-700 text-[9px] font-bold flex items-center justify-center shrink-0">
+                          {tm.orderNumber}
                         </span>
                         {tm.shortName && (
-                          <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 font-bold border border-indigo-200 text-[10px] rounded shrink-0">
+                          <span className="px-1 py-0.2 bg-indigo-50 text-indigo-700 font-bold border border-indigo-200 text-[9px] rounded shrink-0">
                             {tm.shortName}
                           </span>
                         )}
-                        <span className="font-medium text-slate-800">{tm.content}</span>
+                        <span className="font-medium text-slate-800 text-[11px]">{tm.content}</span>
                       </div>
                       {tm.isDgOnly && (
-                        <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 font-bold text-[10px] rounded border border-amber-300 shrink-0">
+                        <span className="px-1.5 py-0.2 bg-amber-100 text-amber-800 font-bold text-[9px] rounded border border-amber-300 shrink-0">
                           DG専用
                         </span>
                       )}
@@ -776,12 +929,12 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
           )}
         </div>
 
-        {/* Footer Actions */}
-        <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-between items-center gap-2">
+        {/* Footer Actions (Compact) */}
+        <div className="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex justify-between items-center gap-2 shrink-0">
           <div className="flex items-center space-x-2">
             <button
               onClick={handleCancelClose}
-              className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 cursor-pointer bg-white border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-2xs"
+              className="px-3.5 py-1.5 text-xs font-bold text-slate-600 hover:text-slate-900 cursor-pointer bg-white border border-slate-200 hover:border-slate-300 rounded-lg transition-all shadow-2xs"
             >
               {existingShipment ? '取り込みを行わない (キャンセル)' : 'キャンセル'}
             </button>
@@ -789,11 +942,11 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
             {parsedResult && (
               <button
                 onClick={resetUploadState}
-                className="px-3 py-2 text-xs font-bold text-blue-600 hover:text-blue-800 cursor-pointer bg-blue-50/80 hover:bg-blue-100 border border-blue-200 rounded-xl transition-all flex items-center space-x-1"
+                className="px-2.5 py-1.5 text-xs font-bold text-blue-600 hover:text-blue-800 cursor-pointer bg-blue-50/80 hover:bg-blue-100 border border-blue-200 rounded-lg transition-all flex items-center space-x-1"
                 title="解析結果をクリアして別のPDFを選択します"
               >
                 <FileUp className="w-3.5 h-3.5" />
-                <span>別のファイルを新規取り込み</span>
+                <span>別のファイルを選択</span>
               </button>
             )}
           </div>
@@ -801,13 +954,13 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({ isOpen, onClose,
           {parsedResult && (
             <button
               onClick={handleConfirmSave}
-              className={`px-5 py-2.5 text-xs font-bold text-white rounded-xl shadow-md inline-flex items-center transition-all transform active:scale-95 cursor-pointer ${
+              className={`px-4 py-1.5 text-xs font-bold text-white rounded-lg shadow-sm inline-flex items-center transition-all transform active:scale-95 cursor-pointer ${
                 existingShipment
                   ? 'bg-amber-600 hover:bg-amber-500'
                   : 'bg-blue-600 hover:bg-blue-500'
               }`}
             >
-              <Check className="w-4 h-4 mr-1.5" />
+              <Check className="w-3.5 h-3.5 mr-1" />
               {existingShipment ? '既存データを上書き更新する' : 'この案件を管理システムに確定登録'}
             </button>
           )}
