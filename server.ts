@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import { m365Router } from './server/m365Router';
@@ -11,6 +10,17 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// CORS headers middleware
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
 // Serve public static assets (including pdf.worker.min.mjs and cmaps)
 const publicDir = path.join(process.cwd(), 'public');
@@ -985,8 +995,18 @@ ${textContent ? `【参考テキスト（PDF内部テキストレイヤー）】
   }
 });
 
+// Global Express Error Handling Middleware
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('Unhandled Server Error:', err);
+  res.status(500).json({
+    success: false,
+    error: err?.message || 'サーバー内部エラーが発生しました。',
+  });
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
