@@ -7,6 +7,7 @@ import { db } from './firebase';
 import { doc, setDoc, collection, onSnapshot, writeBatch, deleteDoc } from 'firebase/firestore';
 import { recordFirestoreRead } from './firestoreMetricsService';
 import { showToast } from './notificationService';
+import { safeLocalStorageSetItem } from './m365EmailService';
 
 
 let cachedShipments: Shipment[] | null = null;
@@ -1198,7 +1199,7 @@ export function getEmailLogs(shipmentIdOrMawb?: string): CustomsEmailLog[] {
 
   if (hasUpdated) {
     try {
-      localStorage.setItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(allLogs));
+      safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(allLogs));
     } catch (e) {
       console.warn('Failed to cache initial email logs:', e);
     }
@@ -1238,7 +1239,7 @@ export function addCustomsEmailLog(
 
   const updatedLogs = [logWithId, ...allLogs.filter((l) => l.id !== logWithId.id)];
   try {
-    localStorage.setItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(updatedLogs));
+    safeLocalStorageSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(updatedLogs));
   } catch (e) {
     console.warn('Failed to save email log to storage:', e);
   }
