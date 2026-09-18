@@ -284,7 +284,7 @@ async function resolveMailboxTarget(
  */
 m365Router.post('/users', async (req, res) => {
   try {
-    const { tenantId, clientId, clientSecret } = req.body;
+    const { tenantId, clientId, clientSecret } = req.body || {};
     const actualTenantId = tenantId || process.env.M365_TENANT_ID;
     const actualClientId = clientId || process.env.M365_CLIENT_ID;
     const actualClientSecret = clientSecret || process.env.M365_CLIENT_SECRET;
@@ -333,7 +333,7 @@ m365Router.post('/users', async (req, res) => {
  */
 m365Router.post('/test-connection', async (req, res) => {
   try {
-    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName } = req.body;
+    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName } = req.body || {};
 
     const actualTenantId = tenantId || process.env.M365_TENANT_ID;
     const actualClientId = clientId || process.env.M365_CLIENT_ID;
@@ -471,7 +471,7 @@ m365Router.post('/sync', async (req, res) => {
       folder = 'both',
       retentionDays = 7,
       retentionStartDate,
-    } = req.body;
+    } = req.body || {};
     const fetchInbox = folder === 'both' || folder === 'inbox';
     const fetchSent = folder === 'both' || folder === 'sent';
 
@@ -923,7 +923,7 @@ m365Router.post('/sync', async (req, res) => {
  */
 m365Router.post('/send', async (req, res) => {
   try {
-    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName, toRecipients, ccRecipients, subject, body, isHtml } = req.body;
+    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName, toRecipients, ccRecipients, subject, body, isHtml } = req.body || {};
 
     const actualTenantId = tenantId || process.env.M365_TENANT_ID;
     const actualClientId = clientId || process.env.M365_CLIENT_ID;
@@ -1111,7 +1111,7 @@ m365Router.post('/send', async (req, res) => {
  */
 m365Router.post('/attachment', async (req, res) => {
   try {
-    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName, messageId, attachmentId } = req.body;
+    const { tenantId, clientId, clientSecret, groupEmail, userPrincipalName, messageId, attachmentId } = req.body || {};
 
     const actualTenantId = tenantId || process.env.M365_TENANT_ID;
     const actualClientId = clientId || process.env.M365_CLIENT_ID;
