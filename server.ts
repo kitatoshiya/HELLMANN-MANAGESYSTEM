@@ -65,35 +65,27 @@ import os from 'os';
 /**
  * Server-side persistent PDF storage for multi-user / multi-terminal access
  */
-const getPdfStoreDir = (): string => {
-  const primaryDir = path.join(process.cwd(), 'data', 'pdfs');
-  try {
-    if (!fs.existsSync(primaryDir)) {
-      fs.mkdirSync(primaryDir, { recursive: true });
-    }
-    const testFile = path.join(primaryDir, `.write-test-${Date.now()}`);
-    fs.writeFileSync(testFile, 'test');
-    fs.unlinkSync(testFile);
-    return primaryDir;
-  } catch {
-    const tmpDir = path.join(os.tmpdir(), 'export_mgmt_pdfs');
-    try {
-      if (!fs.existsSync(tmpDir)) {
-        fs.mkdirSync(tmpDir, { recursive: true });
-      }
-    } catch {}
-    return tmpDir;
-  }
-};
-
-const PDF_STORE_DIR = getPdfStoreDir();
-
 const pdfServerCache = new Map<string, string>();
+
+function getPdfStoreDir(): string | null {
+  try {
+    const primaryDir = path.join(process.cwd(), 'data', 'pdfs');
+    if (fs.existsSync(primaryDir)) return primaryDir;
+    
+    const tmpDir = path.join(os.tmpdir(), 'export_mgmt_pdfs');
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    return tmpDir;
+  } catch {
+    return null;
+  }
+}
 
 app.get('/api/shipment-pdfs/:id', (req, res) => {
   try {
     const rawId = req.params.id;
-    if (!rawId) return res.status(400).json({ success: false, error: 'ID required' });
+    if (!rawId) return res.status(200).json({ success: false, pdfDataUrl: null, error: 'ID required' });
 
     const safeId = String(rawId).trim().replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -102,12 +94,15 @@ app.get('/api/shipment-pdfs/:id', (req, res) => {
     }
 
     try {
-      const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
-      if (fs.existsSync(filePath)) {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        if (data && data.pdfDataUrl) {
-          pdfServerCache.set(safeId, data.pdfDataUrl);
-          return res.json({ success: true, pdfDataUrl: data.pdfDataUrl });
+      const storeDir = getPdfStoreDir();
+      if (storeDir) {
+        const filePath = path.join(storeDir, `${safeId}.json`);
+        if (fs.existsSync(filePath)) {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          if (data && data.pdfDataUrl) {
+            pdfServerCache.set(safeId, data.pdfDataUrl);
+            return res.json({ success: true, pdfDataUrl: data.pdfDataUrl });
+          }
         }
       }
     } catch (e) {
@@ -137,10 +132,17 @@ app.get(['/pdfs/:id', '/shipment_pdfs/:id'], (req, res) => {
     let pdfUrl: string | null = pdfServerCache.get(safeId) || null;
 
     if (!pdfUrl) {
-      const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
-      if (fs.existsSync(filePath)) {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        pdfUrl = data.pdfDataUrl;
+      try {
+        const storeDir = getPdfStoreDir();
+        if (storeDir) {
+          const filePath = path.join(storeDir, `${safeId}.json`);
+          if (fs.existsSync(filePath)) {
+            const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            pdfUrl = data?.pdfDataUrl || null;
+          }
+        }
+      } catch (e) {
+        // Ignored in read-only environment
       }
     }
 
@@ -205,12 +207,15 @@ app.post('/api/shipment-pdfs', (req, res) => {
       pdfServerCache.set(safeId, pdfDataUrl);
 
       try {
-        const filePath = path.join(PDF_STORE_DIR, `${safeId}.json`);
-        fs.writeFileSync(
-          filePath,
-          JSON.stringify({ shipmentId: rawId, pdfDataUrl, updatedAt: new Date().toISOString() }),
-          'utf8'
-        );
+        const storeDir = getPdfStoreDir();
+        if (storeDir) {
+          const filePath = path.join(storeDir, `${safeId}.json`);
+          fs.writeFileSync(
+            filePath,
+            JSON.stringify({ shipmentId: rawId, pdfDataUrl, updatedAt: new Date().toISOString() }),
+            'utf8'
+          );
+        }
       } catch (e) {
         // Disk write fallback in read-only environment
       }
@@ -226,15 +231,10 @@ app.post('/api/shipment-pdfs', (req, res) => {
 /**
  * Shared Server-side Billing Pattern Presets Store
  */
-const DATA_DIR = path.join(process.cwd(), 'data');
-try {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-} catch (e) {
-  // Ignored in read-only serverless environments
+function getPresetsFilePath(): string {
+  const dataDir = path.join(process.cwd(), 'data');
+  return path.join(dataDir, 'billing_presets.json');
 }
-const PRESETS_FILE = path.join(DATA_DIR, 'billing_presets.json');
 
 const INITIAL_BILLING_PRESETS = [
   {
@@ -281,9 +281,10 @@ function readServerPresets() {
   if (serverMemoryPresets && serverMemoryPresets.length > 0) {
     return serverMemoryPresets;
   }
+  const presetsFile = getPresetsFilePath();
   try {
-    if (fs.existsSync(PRESETS_FILE)) {
-      const content = fs.readFileSync(PRESETS_FILE, 'utf8');
+    if (fs.existsSync(presetsFile)) {
+      const content = fs.readFileSync(presetsFile, 'utf8');
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed) && parsed.length > 0) {
         const hasDefault = parsed.some((p: any) => p.isDefault);
@@ -299,7 +300,11 @@ function readServerPresets() {
   }
   // Initialize file if missing or empty
   try {
-    fs.writeFileSync(PRESETS_FILE, JSON.stringify(INITIAL_BILLING_PRESETS, null, 2), 'utf8');
+    const dataDir = path.dirname(presetsFile);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    fs.writeFileSync(presetsFile, JSON.stringify(INITIAL_BILLING_PRESETS, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing initial billing presets:', e);
   }
@@ -310,7 +315,12 @@ function readServerPresets() {
 function writeServerPresets(presets: any[]) {
   serverMemoryPresets = presets;
   try {
-    fs.writeFileSync(PRESETS_FILE, JSON.stringify(presets, null, 2), 'utf8');
+    const presetsFile = getPresetsFilePath();
+    const dataDir = path.dirname(presetsFile);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    fs.writeFileSync(presetsFile, JSON.stringify(presets, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing billing presets:', e);
   }

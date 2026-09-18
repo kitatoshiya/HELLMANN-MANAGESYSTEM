@@ -201,12 +201,12 @@ export async function getPdfFromStorageAsync(shipmentId: string): Promise<string
 
       const res = await fetch(`/api/shipment-pdfs/${encodeURIComponent(cleanId)}`, {
         signal: controller.signal,
-      });
+      }).catch(() => null);
       clearTimeout(timeoutId);
 
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && json.pdfDataUrl && json.pdfDataUrl.length > 500) {
+      if (res && res.ok) {
+        const json = await res.json().catch(() => null);
+        if (json && json.success && json.pdfDataUrl && json.pdfDataUrl.length > 500) {
           pdfMemoryCache.set(cleanId, json.pdfDataUrl);
 
           // Store locally in IndexedDB in background
