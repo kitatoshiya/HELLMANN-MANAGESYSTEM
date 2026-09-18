@@ -7,8 +7,14 @@ import { db } from './firebase';
 import { doc, setDoc, collection, onSnapshot, writeBatch, deleteDoc } from 'firebase/firestore';
 import { recordFirestoreRead } from './firestoreMetricsService';
 import { showToast } from './notificationService';
-import { safeLocalStorageSetItem } from './m365EmailService';
+import { safeLocalStorageSetItem, vacuumLocalStorage } from './m365EmailService';
 
+// Run storage vacuum on module load to keep localStorage slim and prevent QuotaExceededError
+if (typeof window !== 'undefined') {
+  try {
+    vacuumLocalStorage();
+  } catch {}
+}
 
 let cachedShipments: Shipment[] | null = null;
 let cachedLogs: ActivityLog[] | null = null;
@@ -57,7 +63,7 @@ function getPendingSyncQueue(): Record<string, { type: 'SET' | 'DELETE'; payload
 
 function savePendingSyncQueue(queue: Record<string, { type: 'SET' | 'DELETE'; payload?: any; timestamp: number }>) {
   try {
-    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+    safeLocalStorageSetItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
     updateSyncStatus({ pendingCount: Object.keys(queue).length });
   } catch {}
 }
@@ -369,7 +375,7 @@ export function initializeFirebaseStorage() {
 
     // Also save to localStorage for offline fallback (sanitized, excluding large PDF blobs)
     try {
-      localStorage.setItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
+      safeLocalStorageSetItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
     } catch (e) {
       console.warn('[Storage] LocalStorage setItem failed:', e);
     }
@@ -436,7 +442,7 @@ export function initializeFirebaseStorage() {
       recordFirestoreRead('logs_and_notifications', snapshot.docs.length, snapshot.metadata.fromCache, 'storageManager (logs snapshot)');
     }
     try {
-      localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(cachedLogs));
+      safeLocalStorageSetItem(STORAGE_KEYS.LOGS, JSON.stringify(cachedLogs));
     } catch(e){}
     notifyListeners();
   }, (err) => {
@@ -488,7 +494,7 @@ export function getCurrentUser(): User {
 }
 
 export function setCurrentUser(user: User): void {
-  localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+  safeLocalStorageSetItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
   notifyListeners();
 }
 
@@ -537,7 +543,7 @@ export function getShipments(): Shipment[] {
           customsQas: cleanCustomsQas(s.customsQas),
         }));
       if (shipments.length !== rawList.length || JSON.stringify(shipments) !== saved) {
-        localStorage.setItem(STORAGE_KEYS.SHIPMENTS, JSON.stringify(shipments));
+        safeLocalStorageSetItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(shipments));
       }
     } catch {
       shipments = [];
@@ -972,7 +978,7 @@ export function saveShipmentsHelper(rawShipments: Shipment[], explicitDirtyIds?:
   // Local cache optimistic update
   cachedShipments = deduplicateShipments(shipments);
   try {
-    localStorage.setItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
+    safeLocalStorageSetItem(STORAGE_KEYS.SHIPMENTS, sanitizeShipmentsForLocalStorage(cachedShipments));
   } catch (e) {
     console.warn('[Storage] LocalStorage setItem failed:', e);
   }

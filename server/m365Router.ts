@@ -550,136 +550,102 @@ m365Router.post('/sync', async (req, res) => {
       const processedInbox: any[] = [];
       const processedSent: any[] = [];
 
-      // Fetch posts for top threads
-      for (const thread of threads.slice(0, 30)) {
-        try {
-          const threadLastDelivered = thread.lastDeliveredDateTime ? new Date(thread.lastDeliveredDateTime).getTime() : 0;
-          if (cutoffTime > 0 && threadLastDelivered > 0 && threadLastDelivered < cutoffTime) {
-            // Skip threads whose last delivered message is older than cutoff
-            continue;
-          }
+      // Fetch posts for top threads in parallel (max 15 threads)
+      const targetThreads = threads.slice(0, 15);
+      const threadResults = await Promise.all(
+        targetThreads.map(async (thread) => {
+          try {
+            const threadLastDelivered = thread.lastDeliveredDateTime ? new Date(thread.lastDeliveredDateTime).getTime() : 0;
+            if (cutoffTime > 0 && threadLastDelivered > 0 && threadLastDelivered < cutoffTime) {
+              return { inbox: [], sent: [] };
+            }
 
-          const threadTo = parseGraphRecipientsList(thread.toRecipients);
-          const threadCc = parseGraphRecipientsList(thread.ccRecipients);
+            const threadTo = parseGraphRecipientsList(thread.toRecipients);
+            const threadCc = parseGraphRecipientsList(thread.ccRecipients);
 
-          // Note: Graph API /groups/{id}/threads/{id}/posts does NOT support $orderby or bodyPreview in $select, so we fetch without bodyPreview and sort in memory
-          const postsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
-            resolution.userId
-          )}/threads/${thread.id}/posts?$top=30&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
-          const postsResp = await fetch(postsUrl, {
-            headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-          });
+            const postsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
+              resolution.userId
+            )}/threads/${thread.id}/posts?$top=15&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
+            const postsResp = await fetch(postsUrl, {
+              headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+            });
 
-          if (!postsResp.ok) {
-            const pErr = (await postsResp.json().catch(() => ({}))) as any;
-            console.warn(`[Group Post Fetch Error] Thread ${thread.id} (${postsResp.status}):`, pErr.error?.message || postsResp.statusText);
-            continue;
-          }
-          const postsData = (await postsResp.json()) as any;
-          const posts: any[] = Array.isArray(postsData.value) ? postsData.value : [];
+            if (!postsResp.ok) return { inbox: [], sent: [] };
+            const postsData = (await postsResp.json().catch(() => ({}))) as any;
+            const posts: any[] = Array.isArray(postsData.value) ? postsData.value : [];
 
-          // Sort posts in memory by receivedDateTime desc
-          posts.sort((a, b) => new Date(b.receivedDateTime || 0).getTime() - new Date(a.receivedDateTime || 0).getTime());
+            const threadInbox: any[] = [];
+            const threadSent: any[] = [];
 
-          // Fetch post attachment metadata without downloading heavy contentBytes upfront
-          for (const post of posts) {
-            let attachments: any[] = [];
-            if (post.hasAttachments) {
-              try {
-                const attachResp = await fetch(
-                  `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
-                    resolution.userId
-                  )}/threads/${thread.id}/posts/${post.id}/attachments?$select=id,name,contentType,size,isInline`,
-                  { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
-                );
-                if (attachResp.ok) {
-                  const aData = (await attachResp.json()) as any;
-                  if (Array.isArray(aData.value)) {
-                    attachments = aData.value.map((att: any) => {
-                      const isPdf =
-                        (att.contentType && att.contentType.toLowerCase().includes('pdf')) ||
-                        (att.name && att.name.toLowerCase().endsWith('.pdf'));
-                      return {
-                        id: att.id,
-                        fileName: att.name || 'attachment',
-                        contentType: att.contentType || (isPdf ? 'application/pdf' : 'application/octet-stream'),
-                        sizeBytes: att.size || 0,
-                        isPdf: !!isPdf,
-                        contentId: att.contentId || att.name || '',
-                        isInline: !!att.isInline,
-                      };
-                    });
-                  }
+            for (const post of posts) {
+              const senderAddress = post.from?.emailAddress?.address?.toLowerCase() || '';
+              const isUserSender =
+                (userPrincipalName && senderAddress === userPrincipalName.toLowerCase()) ||
+                senderAddress.startsWith('kita@') ||
+                senderAddress.includes('tac-japan.co.jp');
+
+              const postNewParticipants = parseGraphRecipientsList(post.newParticipants);
+              const contentHeaders = extractHeaderRecipientsFromText(post.body?.content || '');
+
+              const combinedToSet = new Set<string>();
+              for (const t of [...threadTo, ...postNewParticipants, ...contentHeaders.to]) {
+                if (t && t.toLowerCase() !== senderAddress) combinedToSet.add(t);
+              }
+              if (combinedToSet.size === 0 && targetEmail) {
+                combinedToSet.add(targetEmail);
+              }
+              const finalToRecipients = Array.from(combinedToSet);
+
+              const combinedCcSet = new Set<string>();
+              for (const c of [...threadCc, ...contentHeaders.cc]) {
+                if (c && !combinedToSet.has(c) && c.toLowerCase() !== senderAddress) {
+                  combinedCcSet.add(c);
                 }
-              } catch (e) {
-                console.warn('Group post attachment fetch error:', e);
+              }
+              const finalCcRecipients = Array.from(combinedCcSet);
+
+              const item = {
+                id: `graph_${post.id}`,
+                graphMessageId: post.id,
+                conversationId: thread.id,
+                direction: 'INCOMING' as const,
+                folder: 'INBOX' as const,
+                isRead: true,
+                receivedDateTime: post.receivedDateTime || thread.lastDeliveredDateTime || new Date().toISOString(),
+                subject: thread.topic || '（件名なし）',
+                sender: {
+                  name: post.from?.emailAddress?.name || post.from?.emailAddress?.address || 'TAC Hellmann TEAM',
+                  email: post.from?.emailAddress?.address || targetEmail,
+                },
+                toRecipients: finalToRecipients,
+                ccRecipients: finalCcRecipients,
+                bodyText: post.body?.contentType === 'text' 
+                  ? (post.body.content || '') 
+                  : (post.body?.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+                bodyHtml: post.body?.contentType === 'html' ? post.body.content : undefined,
+                attachments: [],
+                hasAttachments: !!post.hasAttachments,
+              };
+
+              threadInbox.push(item);
+              if (isUserSender) {
+                threadSent.push({
+                  ...item,
+                  direction: 'OUTGOING' as const,
+                  folder: 'SENT' as const,
+                });
               }
             }
-
-            const senderAddress = post.from?.emailAddress?.address?.toLowerCase() || '';
-            const isUserSender =
-              (userPrincipalName && senderAddress === userPrincipalName.toLowerCase()) ||
-              senderAddress.startsWith('kita@') ||
-              senderAddress.includes('tac-japan.co.jp');
-
-            // Extract recipients from post, thread, and body headers
-            const postNewParticipants = parseGraphRecipientsList(post.newParticipants);
-            const contentHeaders = extractHeaderRecipientsFromText(post.body?.content || '');
-
-            const combinedToSet = new Set<string>();
-            for (const t of [...threadTo, ...postNewParticipants, ...contentHeaders.to]) {
-              if (t && t.toLowerCase() !== senderAddress) combinedToSet.add(t);
-            }
-            if (combinedToSet.size === 0 && targetEmail) {
-              combinedToSet.add(targetEmail);
-            }
-            const finalToRecipients = Array.from(combinedToSet);
-
-            const combinedCcSet = new Set<string>();
-            for (const c of [...threadCc, ...contentHeaders.cc]) {
-              if (c && !combinedToSet.has(c) && c.toLowerCase() !== senderAddress) {
-                combinedCcSet.add(c);
-              }
-            }
-            const finalCcRecipients = Array.from(combinedCcSet);
-
-            const item = {
-              id: `graph_${post.id}`,
-              graphMessageId: post.id,
-              conversationId: thread.id,
-              direction: 'INCOMING' as const,
-              folder: 'INBOX' as const,
-              isRead: true,
-              receivedDateTime: post.receivedDateTime || thread.lastDeliveredDateTime || new Date().toISOString(),
-              subject: thread.topic || '（件名なし）',
-              sender: {
-                name: post.from?.emailAddress?.name || post.from?.emailAddress?.address || 'TAC Hellmann TEAM',
-                email: post.from?.emailAddress?.address || targetEmail,
-              },
-              toRecipients: finalToRecipients,
-              ccRecipients: finalCcRecipients,
-              bodyText: post.body?.contentType === 'text' 
-                ? (post.body.content || '') 
-                : (post.body?.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
-              bodyHtml: post.body?.contentType === 'html' ? post.body.content : undefined,
-              attachments,
-            };
-
-            // All group posts are part of the Group Inbox
-            processedInbox.push(item);
-
-            // If sent by active user, also include a copy in Sent items
-            if (isUserSender) {
-              processedSent.push({
-                ...item,
-                direction: 'OUTGOING' as const,
-                folder: 'SENT' as const,
-              });
-            }
+            return { inbox: threadInbox, sent: threadSent };
+          } catch {
+            return { inbox: [], sent: [] };
           }
-        } catch (postErr) {
-          console.warn('Thread posts error:', postErr);
-        }
+        })
+      );
+
+      for (const resItem of threadResults) {
+        processedInbox.push(...resItem.inbox);
+        processedSent.push(...resItem.sent);
       }
 
       return res.json({
@@ -693,15 +659,15 @@ m365Router.post('/sync', async (req, res) => {
     }
 
     // B. If target is a standard User or Shared Mailbox
-    // 1. Fetch messages from Inbox (only if requested)
+    // 1. Fetch messages from Inbox with expand=attachments (single round-trip, no N+1 query loops)
     const inboxUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       targetUserIdentifier
-    )}/mailFolders/inbox/messages?$top=${limit}&$orderby=receivedDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead`;
+    )}/mailFolders/inbox/messages?$top=${limit}&$orderby=receivedDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead&$expand=attachments($select=id,name,contentType,size,isInline)`;
 
-    // 2. Fetch messages from SentItems (only if requested)
+    // 2. Fetch messages from SentItems with expand=attachments
     const sentUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       targetUserIdentifier
-    )}/mailFolders/sentitems/messages?$top=${limit}&$orderby=sentDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,sentDateTime,hasAttachments,isRead`;
+    )}/mailFolders/sentitems/messages?$top=${limit}&$orderby=sentDateTime%20desc&$select=id,conversationId,subject,bodyPreview,body,from,sender,toRecipients,ccRecipients,sentDateTime,hasAttachments,isRead&$expand=attachments($select=id,name,contentType,size,isInline)`;
 
     const [inboxResp, sentResp] = await Promise.all([
       fetchInbox
@@ -750,22 +716,13 @@ m365Router.post('/sync', async (req, res) => {
     const rawInboxMessages: any[] = Array.isArray(inboxData.value) ? inboxData.value : [];
     const rawSentMessages: any[] = Array.isArray(sentData.value) ? sentData.value : [];
 
-    // Helper to fetch attachments for messages that have attachments (metadata only for high performance)
-    async function getMessageAttachments(messageId: string): Promise<any[]> {
-      try {
-        const attResp = await fetch(
-          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(targetUserIdentifier)}/messages/${messageId}/attachments?$select=id,name,contentType,size,isInline`,
-          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
-        );
-        if (!attResp.ok) return [];
-        const attData = (await attResp.json()) as any;
-        if (!Array.isArray(attData.value)) return [];
-
-        return attData.value.map((att: any) => {
+    // Map attachment metadata directly without making extra HTTP calls
+    function mapAttachments(msg: any): any[] {
+      if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+        return msg.attachments.map((att: any) => {
           const isPdf =
             (att.contentType && att.contentType.toLowerCase().includes('pdf')) ||
             (att.name && att.name.toLowerCase().endsWith('.pdf'));
-
           return {
             id: att.id,
             fileName: att.name || 'attachment',
@@ -776,10 +733,8 @@ m365Router.post('/sync', async (req, res) => {
             isInline: !!att.isInline,
           };
         });
-      } catch (e) {
-        console.warn(`Failed to fetch attachments for message ${messageId}:`, e);
-        return [];
       }
+      return [];
     }
 
     // Process inbox items
@@ -788,15 +743,10 @@ m365Router.post('/sync', async (req, res) => {
       const mailReceivedTime = msg.receivedDateTime || msg.createdDateTime || msg.sentDateTime || new Date().toISOString();
       const mailTimestamp = new Date(mailReceivedTime).getTime();
       if (cutoffTime > 0 && mailTimestamp > 0 && mailTimestamp < cutoffTime) {
-        // Skip messages older than cutoff retention limit
         continue;
       }
 
-      let attachments: any[] = [];
-      if (msg.hasAttachments) {
-        attachments = await getMessageAttachments(msg.id);
-      }
-
+      const attachments = mapAttachments(msg);
       const msgTo = parseGraphRecipientsList(msg.toRecipients);
       const msgCc = parseGraphRecipientsList(msg.ccRecipients);
       const contentHeaders = extractHeaderRecipientsFromText(msg.body?.content || msg.bodyPreview || '');
@@ -835,6 +785,7 @@ m365Router.post('/sync', async (req, res) => {
         bodyText: msg.body?.contentType === 'text' ? msg.body.content : (msg.bodyPreview || ''),
         bodyHtml: msg.body?.contentType === 'html' ? msg.body.content : undefined,
         attachments,
+        hasAttachments: !!msg.hasAttachments || attachments.length > 0,
       });
     }
 
@@ -844,14 +795,10 @@ m365Router.post('/sync', async (req, res) => {
       const mailSentTime = msg.sentDateTime || msg.receivedDateTime || msg.createdDateTime || new Date().toISOString();
       const mailTimestamp = new Date(mailSentTime).getTime();
       if (cutoffTime > 0 && mailTimestamp > 0 && mailTimestamp < cutoffTime) {
-        // Skip sent messages older than cutoff retention limit
         continue;
       }
 
-      let attachments: any[] = [];
-      if (msg.hasAttachments) {
-        attachments = await getMessageAttachments(msg.id);
-      }
+      const attachments = mapAttachments(msg);
       const msgTo = parseGraphRecipientsList(msg.toRecipients);
       const msgCc = parseGraphRecipientsList(msg.ccRecipients);
       const contentHeaders = extractHeaderRecipientsFromText(msg.body?.content || msg.bodyPreview || '');
@@ -887,6 +834,7 @@ m365Router.post('/sync', async (req, res) => {
         bodyText: msg.body?.contentType === 'text' ? msg.body.content : (msg.bodyPreview || ''),
         bodyHtml: msg.body?.contentType === 'html' ? msg.body.content : undefined,
         attachments,
+        hasAttachments: !!msg.hasAttachments || attachments.length > 0,
       });
     }
 

@@ -150,11 +150,86 @@ export function sanitizeUnifiedMailsForLocalStorage(mails: UnifiedMailItem[]): U
 }
 
 /**
+ * Aggressively scans and vacuums localStorage to free up space (removing legacy large blobs,
+ * PDF base64 entries, bloated logs, and truncating email body payloads).
+ */
+export function vacuumLocalStorage(): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+
+  try {
+    // 1. Remove obsolete metric & cache keys
+    const obsoleteKeys = [
+      'firestore_metrics_events',
+      'firestore_read_metrics',
+      'export_mgmt_customs_email_logs_v1',
+      'pdf_cache_v1',
+      'gemini_cache_v1',
+      'm365_sync_debug_logs',
+    ];
+    obsoleteKeys.forEach((k) => {
+      try {
+        localStorage.removeItem(k);
+      } catch {}
+    });
+
+    // 2. Remove all legacy PDF base64 keys from localStorage (PDFs belong in IndexedDB / Memory)
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && (k.startsWith('pdf_store_') || k.startsWith('pdf_blob_') || k.startsWith('pdf_temp_'))) {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      }
+    }
+
+    // 3. Compact large JSON arrays in localStorage
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      try {
+        const val = localStorage.getItem(k);
+        if (val && val.length > 25000) {
+          const parsed = JSON.parse(val);
+          if (Array.isArray(parsed)) {
+            const compacted = parsed.slice(-20).map((item: any) => {
+              if (item && typeof item === 'object') {
+                const c = { ...item };
+                delete c.bodyHtml;
+                delete c.htmlBody;
+                delete c.pdfDataUrl;
+                delete c.originalPdfUrl;
+                if (typeof c.bodyText === 'string' && c.bodyText.length > 200) {
+                  c.bodyText = c.bodyText.substring(0, 200);
+                }
+                if (typeof c.body === 'string' && c.body.length > 200) {
+                  c.body = c.body.substring(0, 200);
+                }
+                if (Array.isArray(c.attachments)) {
+                  c.attachments = c.attachments.map((a: any) => {
+                    const { dataUrl, contentBytes, ...rest } = a || {};
+                    return rest;
+                  });
+                }
+                return c;
+              }
+              return item;
+            });
+            localStorage.setItem(k, JSON.stringify(compacted));
+          }
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('[Storage] Vacuum warning:', err);
+  }
+}
+
+/**
  * Safely sets an item in localStorage, handling QuotaExceededError automatically
  * by pruning legacy caches, stripping huge attachments/bodies, and vacuuming obsolete items.
  */
 export function safeLocalStorageSetItem(key: string, value: string): boolean {
-  if (typeof window === 'undefined') return false;
+  if (typeof window === 'undefined' || !window.localStorage) return false;
 
   const trySet = (val: string): boolean => {
     try {
@@ -170,104 +245,56 @@ export function safeLocalStorageSetItem(key: string, value: string): boolean {
 
   // 2. If it failed due to Quota, perform aggressive cleanup & vacuum
   console.warn(`[localStorage] Quota reached while setting '${key}'. Executing automated storage vacuum...`);
-  try {
-    // Clear non-essential metric caches
-    try {
-      localStorage.removeItem('firestore_metrics_events');
-      localStorage.removeItem('firestore_read_metrics');
-      localStorage.removeItem('export_mgmt_customs_email_logs_v1');
-    } catch (_) {}
+  vacuumLocalStorage();
 
-    // Vacuum legacy PDF base64 keys
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('pdf_store_')) {
-        localStorage.removeItem(k);
+  // Try again with the original value
+  if (trySet(value)) return true;
+
+  // 3. If still failing, aggressively trim the target value itself if it's an array
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      const cleanItem = (item: any) => {
+        if (item && typeof item === 'object') {
+          const copy = { ...item };
+          delete copy.bodyHtml;
+          delete copy.htmlBody;
+          delete copy.htmlContent;
+          delete copy.rawHtml;
+          delete copy.pdfDataUrl;
+          delete copy.originalPdfUrl;
+          delete copy.pdfBase64;
+          delete copy.rawPayload;
+          delete copy.payload;
+          delete copy.attachmentData;
+          if (typeof copy.bodyText === 'string') copy.bodyText = copy.bodyText.substring(0, 150);
+          if (typeof copy.body === 'string') copy.body = copy.body.substring(0, 150);
+          if (typeof copy.details === 'string') copy.details = copy.details.substring(0, 150);
+          if (Array.isArray(copy.attachments)) {
+            copy.attachments = copy.attachments.map((att: any) => {
+              if (att && typeof att === 'object') {
+                const { dataUrl, content, contentBytes, ...rest } = att;
+                return rest;
+              }
+              return att;
+            });
+          }
+          return copy;
+        }
+        return item;
+      };
+
+      for (const count of [20, 10, 5, 2]) {
+        const trimmed = parsed.slice(-count).map(cleanItem);
+        if (trySet(JSON.stringify(trimmed))) {
+          console.log(`[localStorage] Successfully saved aggressively trimmed array (${count} items) for '${key}'.`);
+          return true;
+        }
       }
     }
+  } catch (_) {}
 
-    // Vacuum other large cached mail lists in localStorage
-    const pruneStoreKey = (storeKey: string) => {
-      try {
-        const r = localStorage.getItem(storeKey);
-        if (r && r.length > 10000) {
-          const list = JSON.parse(r);
-          if (Array.isArray(list)) {
-            const trimmed = list.slice(-15).map((x: any) => {
-              const c = { ...x };
-              delete c.bodyHtml;
-              if (c.bodyText) c.bodyText = String(c.bodyText).substring(0, 300);
-              if (c.body) c.body = String(c.body).substring(0, 300);
-              if (Array.isArray(c.attachments)) {
-                c.attachments = c.attachments.map((a: any) => {
-                  const { dataUrl, ...rest } = a || {};
-                  return rest;
-                });
-              }
-              return c;
-            });
-            localStorage.setItem(storeKey, JSON.stringify(trimmed));
-          }
-        }
-      } catch (_) {}
-    };
-
-    if (key !== GRAPH_INBOX_MAILS_KEY) pruneStoreKey(GRAPH_INBOX_MAILS_KEY);
-    if (key !== GRAPH_SENT_MAILS_KEY) pruneStoreKey(GRAPH_SENT_MAILS_KEY);
-    if (key !== HELLMANN_ORDERS_KEY) pruneStoreKey(HELLMANN_ORDERS_KEY);
-
-    // Try again with the original value
-    if (trySet(value)) return true;
-
-    // If still failing, aggressively trim the target value itself if it's an array
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) {
-        const cleanItem = (item: any) => {
-          if (item && typeof item === 'object') {
-            const copy = { ...item };
-            delete copy.bodyHtml;
-            delete copy.htmlBody;
-            delete copy.htmlContent;
-            delete copy.rawHtml;
-            delete copy.pdfDataUrl;
-            delete copy.pdfBase64;
-            delete copy.rawPayload;
-            delete copy.payload;
-            delete copy.attachmentData;
-            if (typeof copy.bodyText === 'string') copy.bodyText = copy.bodyText.substring(0, 200);
-            if (typeof copy.body === 'string') copy.body = copy.body.substring(0, 200);
-            if (typeof copy.details === 'string') copy.details = copy.details.substring(0, 200);
-            if (Array.isArray(copy.attachments)) {
-              copy.attachments = copy.attachments.map((att: any) => {
-                if (att && typeof att === 'object') {
-                  const { dataUrl, content, ...rest } = att;
-                  return rest;
-                }
-                return att;
-              });
-            }
-            return copy;
-          }
-          return item;
-        };
-
-        for (const count of [15, 8, 4, 2]) {
-          const trimmed = parsed.slice(-count).map(cleanItem);
-          if (trySet(JSON.stringify(trimmed))) {
-            console.log(`[localStorage] Successfully saved aggressively trimmed array (${count} items) for '${key}'.`);
-            return true;
-          }
-        }
-      }
-    } catch (_) {}
-
-    console.warn(`[localStorage] Could not write '${key}' even after vacuum. Operates in memory.`);
-    return false;
-  } catch (err: any) {
-    console.warn(`[localStorage] Error handling quota for '${key}':`, err);
-    return false;
-  }
+  return false;
 }
 
 /**
