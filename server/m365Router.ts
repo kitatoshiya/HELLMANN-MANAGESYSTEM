@@ -581,6 +581,7 @@ m365Router.post('/sync', async (req, res) => {
           // Sort posts in memory by receivedDateTime desc
           posts.sort((a, b) => new Date(b.receivedDateTime || 0).getTime() - new Date(a.receivedDateTime || 0).getTime());
 
+          // Fetch post attachment metadata without downloading heavy contentBytes upfront
           for (const post of posts) {
             let attachments: any[] = [];
             if (post.hasAttachments) {
@@ -588,7 +589,7 @@ m365Router.post('/sync', async (req, res) => {
                 const attachResp = await fetch(
                   `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
                     resolution.userId
-                  )}/threads/${thread.id}/posts/${post.id}/attachments`,
+                  )}/threads/${thread.id}/posts/${post.id}/attachments?$select=id,name,contentType,size,isInline`,
                   { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
                 );
                 if (attachResp.ok) {
@@ -604,9 +605,6 @@ m365Router.post('/sync', async (req, res) => {
                         contentType: att.contentType || (isPdf ? 'application/pdf' : 'application/octet-stream'),
                         sizeBytes: att.size || 0,
                         isPdf: !!isPdf,
-                        dataUrl: att.contentBytes
-                          ? `data:${att.contentType || (isPdf ? 'application/pdf' : 'application/octet-stream')};base64,${att.contentBytes}`
-                          : undefined,
                         contentId: att.contentId || att.name || '',
                         isInline: !!att.isInline,
                       };
@@ -752,11 +750,11 @@ m365Router.post('/sync', async (req, res) => {
     const rawInboxMessages: any[] = Array.isArray(inboxData.value) ? inboxData.value : [];
     const rawSentMessages: any[] = Array.isArray(sentData.value) ? sentData.value : [];
 
-    // Helper to fetch attachments for messages that have attachments
+    // Helper to fetch attachments for messages that have attachments (metadata only for high performance)
     async function getMessageAttachments(messageId: string): Promise<any[]> {
       try {
         const attResp = await fetch(
-          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(targetUserIdentifier)}/messages/${messageId}/attachments`,
+          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(targetUserIdentifier)}/messages/${messageId}/attachments?$select=id,name,contentType,size,isInline`,
           { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
         );
         if (!attResp.ok) return [];
@@ -768,19 +766,12 @@ m365Router.post('/sync', async (req, res) => {
             (att.contentType && att.contentType.toLowerCase().includes('pdf')) ||
             (att.name && att.name.toLowerCase().endsWith('.pdf'));
 
-          let dataUrl: string | undefined;
-          if (att.contentBytes) {
-            const mime = att.contentType || (isPdf ? 'application/pdf' : 'application/octet-stream');
-            dataUrl = `data:${mime};base64,${att.contentBytes}`;
-          }
-
           return {
             id: att.id,
             fileName: att.name || 'attachment',
             contentType: att.contentType || (isPdf ? 'application/pdf' : 'application/octet-stream'),
             sizeBytes: att.size || 0,
             isPdf: !!isPdf,
-            dataUrl,
             contentId: att.contentId || att.name || '',
             isInline: !!att.isInline,
           };

@@ -121,7 +121,7 @@ export async function flushPendingSyncQueue(): Promise<void> {
 }
 
 /**
- * Asynchronously fetch and hydrate original PDF Data URLs for shipments
+ * Asynchronously fetch and hydrate original PDF Data URLs for shipments from local storage / IndexedDB
  */
 let isHydratingPdfs = false;
 export async function hydrateShipmentPdfsAsync(shipments: Shipment[]): Promise<boolean> {
@@ -132,11 +132,14 @@ export async function hydrateShipmentPdfsAsync(shipments: Shipment[]): Promise<b
   try {
     for (const s of shipments) {
       if (!s.originalPdfUrl || s.originalPdfUrl.length < 500) {
-        const storedPdf = await getShipmentPdfAsync(s.id, s.hawbNumber, s.mawbNumber);
+        // Fast sync/IndexedDB local check only to avoid hammering network on boot
+        const syncPdf = getPdfFromStorageSync(s.id) || 
+          (s.hawbNumber ? getPdfFromStorageSync(s.hawbNumber) : null) ||
+          (s.mawbNumber ? getPdfFromStorageSync(s.mawbNumber) : null);
 
-        if (storedPdf) {
-          s.originalPdfUrl = storedPdf;
-          s.pdfDataUrl = storedPdf;
+        if (syncPdf) {
+          s.originalPdfUrl = syncPdf;
+          s.pdfDataUrl = syncPdf;
           s.hasCustomPdf = true;
           updated = true;
         }
