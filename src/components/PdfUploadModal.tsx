@@ -829,11 +829,11 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({
 
                   <div className={`sm:col-span-3 px-2 py-1 rounded-lg border focus-within:ring-1 flex items-center gap-1.5 shadow-2xs ${
                     isHeavyShipment(parsedResult as any)
-                      ? 'bg-red-50 border-red-300 focus-within:border-red-500 focus-within:ring-red-100'
+                      ? 'bg-amber-50/90 border-amber-400 focus-within:border-amber-500 focus-within:ring-amber-200'
                       : 'bg-blue-50/60 border-blue-200/70 focus-within:border-blue-400 focus-within:ring-blue-100'
                   }`}>
                     <span className={`text-[10px] font-bold whitespace-nowrap shrink-0 ${
-                      isHeavyShipment(parsedResult as any) ? 'text-red-900' : 'text-blue-900'
+                      isHeavyShipment(parsedResult as any) ? 'text-amber-950' : 'text-blue-900'
                     }`}>重量 (Gross Wt):</span>
                     <input
                       type="text"
@@ -842,8 +842,8 @@ export const PdfUploadModal: React.FC<PdfUploadModalProps> = ({
                       className="w-full font-bold text-slate-950 bg-transparent text-xs outline-none"
                     />
                     {isHeavyShipment(parsedResult as any) && (
-                      <span className="px-1.5 py-0.5 text-[9.5px] font-black bg-red-600 text-white rounded shrink-0 shadow-2xs border border-red-500 animate-pulse">
-                        重量案件 (薄赤背景)
+                      <span className="px-1.5 py-0.5 text-[9.5px] font-black bg-amber-500 text-slate-950 rounded shrink-0 shadow-2xs border border-amber-600 animate-pulse">
+                        重量案件 (薄黄色表示)
                       </span>
                     )}
                   </div>

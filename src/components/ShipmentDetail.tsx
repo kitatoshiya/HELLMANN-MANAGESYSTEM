@@ -779,9 +779,9 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
             <div className="border-l border-slate-700 h-6" />
             <div>
               <span className="text-slate-400 block text-[10px]">個数 / 重量</span>
-              <span className={`font-mono font-bold ${isHeavy ? 'text-red-300 bg-red-950/80 px-1.5 py-0.5 rounded border border-red-800' : 'text-blue-300'}`}>
+              <span className={`font-mono font-bold ${isHeavy ? 'text-amber-200 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-600' : 'text-blue-300'}`}>
                 {shipment.pieces || '-'} / {shipment.grossWeight || '-'}
-                {isHeavy && <span className="ml-1 text-[9.5px] text-white bg-red-600 px-1 py-0.2 rounded font-black">重量</span>}
+                {isHeavy && <span className="ml-1 text-[9.5px] text-slate-950 bg-amber-400 px-1 py-0.2 rounded font-black">重量</span>}
               </span>
             </div>
             <div className="border-l border-slate-700 h-6" />
@@ -849,11 +849,11 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
               <div>
                 <span className="text-slate-400 text-[11px] block font-medium">重量 (Gross Wt):</span>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className={`font-bold text-[21px] sm:text-[22.5px] font-mono leading-tight block ${isHeavy ? 'text-rose-300' : 'text-indigo-200'}`}>
+                  <span className={`font-bold text-[21px] sm:text-[22.5px] font-mono leading-tight block ${isHeavy ? 'text-amber-300' : 'text-indigo-200'}`}>
                     {shipment.grossWeight || ((shipment as any).weight ? `${(shipment as any).weight} kg` : '-')}
                   </span>
                   {isHeavy && (
-                    <span className="px-1.5 py-0.5 text-[10px] font-black bg-red-600 text-white rounded border border-red-500 animate-pulse">
+                    <span className="px-1.5 py-0.5 text-[10px] font-black bg-amber-400 text-slate-950 rounded border border-amber-500 animate-pulse">
                       重量案件
                     </span>
                   )}

@@ -78,7 +78,7 @@ export interface Shipment {
   status: ShipmentStatus;
   isPinned?: boolean; // ピン留めフラグ (ダッシュボード最上部固定)
   isDgCargo?: boolean; // DG (危険物) フラグ
-  isHeavyCargo?: boolean; // 重量案件フラグ (バックカラー薄赤色表示対象)
+  isHeavyCargo?: boolean; // 重量案件フラグ (1000kg以上・バックカラー薄黄色表示対象)
   isImportant?: boolean; // 重要案件フラグ
   isUrgent?: boolean; // 緊急案件フラグ
   priorityLevel?: 'High' | 'Medium' | 'Low'; // 優先度レベル (High: 高, Medium: 中, Low: 低)

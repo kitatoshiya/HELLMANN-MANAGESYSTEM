@@ -334,42 +334,57 @@ export function calculatePrimaryKey(hawb: string | null | undefined, mawb: strin
 }
 
 /**
- * Helper to extract numeric weight (kg) from grossWeight string (e.g. "1,450.0 KGS", "310.0 KG", "21.2 kg")
+ * Helper to extract numeric weight in kg from grossWeight string
+ * (e.g. "1,450.0 KGS", "1000.0 KG", "21.2 kg", "1.5 T", "1.5 TON", "2トン")
  */
 export function parseNumericWeight(valStr: string | null | undefined): number {
   if (!valStr) return 0;
+  const str = String(valStr).trim().toLowerCase();
+
+  // Check if expressed in tons/tonnes (e.g., "1.2 T", "1.5 TON", "2トン") - exclude "carton"
+  const isTon = /ton|tonne|トン|[\s\d]t(?:[\s,.]|$)/i.test(str) && !/carton/.test(str);
+
   // Remove commas and extract numeric portion with optional decimal
-  const match = String(valStr).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  const match = str.replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
   if (match) {
-    return parseFloat(match[1]);
+    const val = parseFloat(match[1]);
+    return isTon ? val * 1000 : val;
   }
   return 0;
 }
 
 /**
  * Determines whether a shipment is classified as "重量案件" (Heavy Shipment).
+ * Strict Rule: Gross weight >= 1000kg (or explicit toggle / explicit 1000kg+ keyword)
+ * 
  * Criteria:
  * 1. Explicit flag: `shipment.isHeavyCargo === true`
  * 2. Explicit off: `shipment.isHeavyCargo === false`
- * 3. Text indicators: specialNotes, flag, or orderNumber includes "重量", "ヘビー", or "heavy"
- * 4. Gross weight >= 1000kg
+ * 3. Gross weight >= 1000kg (e.g. 1000.0, 1500kg, 2トン)
+ * 4. Explicit heavy cargo indicators: "1000kg", "ヘビーカーゴ", "heavy cargo", "重量物" (excluding simple "重量" or "サイズ重量")
  */
 export function isHeavyShipment(shipment: Shipment | null | undefined): boolean {
   if (!shipment) return false;
 
-  // 1. Explicit property setting
+  // 1. Explicit property setting (manual toggle takes precedence if boolean)
   if (shipment.isHeavyCargo === true) return true;
   if (shipment.isHeavyCargo === false) return false;
 
-  // 2. Keyword check in metadata
-  const textToCheck = `${shipment.flag || ''} ${shipment.specialNotes || ''} ${shipment.orderNumber || ''}`.toLowerCase();
-  if (textToCheck.includes('重量') || textToCheck.includes('ヘビー') || textToCheck.includes('heavy')) {
+  // 2. Gross Weight >= 1000 (kg) - Primary Automatic Rule for PDF Import
+  const weightNum = parseNumericWeight(shipment.grossWeight || (shipment as any).weight);
+  if (weightNum >= 1000) {
     return true;
   }
 
-  // 3. Gross Weight >= 1000 (kg)
-  const weightNum = parseNumericWeight(shipment.grossWeight || (shipment as any).weight);
-  if (weightNum >= 1000) {
+  // 3. Explicit heavy cargo markers (strictly avoid matching generic "重量" or "サイズ重量")
+  const textToCheck = `${shipment.flag || ''} ${shipment.specialNotes || ''} ${shipment.orderNumber || ''}`.toLowerCase();
+  if (
+    textToCheck.includes('重量物') ||
+    textToCheck.includes('ヘビーカーゴ') ||
+    textToCheck.includes('heavy cargo') ||
+    textToCheck.includes('heavy weight') ||
+    /1000\s*kg|1[0-9]{3}\s*kg|[2-9][0-9]{3}\s*kg/i.test(textToCheck)
+  ) {
     return true;
   }
 

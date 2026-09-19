@@ -1,4 +1,5 @@
 import { Shipment, Task, ActivityLog, User, ShipmentStatus, TaskStatus, Operator, ShipmentComment, MilestoneKey, MilestoneState, CloudSyncStatus, CustomsEmailLog, CustomsQaItem } from '../types';
+import { isHeavyShipment } from './awbUtils';
 import { INITIAL_SHIPMENTS, INITIAL_LOGS } from './sampleData';
 import { generatePdfDataUrlFromShipment } from './pdfGenerator';
 import { savePdfToStorage, getPdfFromStorageSync, getPdfFromStorageAsync, getShipmentPdfAsync, rekeyPdfStorage, deletePdfFromStorage } from './pdfStorageService';
@@ -1542,7 +1543,14 @@ export function createShipment(data: {
     cutTime: data.cutTime || null,
     status: initialStatus,
     isDgCargo: !!data.isDgCargo,
-    isHeavyCargo: data.isHeavyCargo !== undefined ? data.isHeavyCargo : undefined,
+    isHeavyCargo: data.isHeavyCargo !== undefined
+      ? data.isHeavyCargo
+      : isHeavyShipment({
+          grossWeight: data.grossWeight,
+          flag: data.flag,
+          specialNotes: data.specialNotes,
+          orderNumber: data.orderNumber,
+        } as any),
     isImportant: !!data.isImportant,
     isUrgent: !!data.isUrgent,
     assignedOperator: data.assignedOperator || null,
@@ -1973,6 +1981,9 @@ export function updateShipmentFields(
   if (updates.grossWeight !== undefined && updates.grossWeight !== shipment.grossWeight) {
     changedList.push(`重量: ${shipment.grossWeight || '-'} → ${updates.grossWeight || '-'}`);
     shipment.grossWeight = updates.grossWeight && updates.grossWeight.trim() ? updates.grossWeight.trim() : null;
+    if (updates.isHeavyCargo === undefined) {
+      shipment.isHeavyCargo = isHeavyShipment(shipment);
+    }
   }
   if (updates.isHeavyCargo !== undefined && updates.isHeavyCargo !== shipment.isHeavyCargo) {
     changedList.push(`重量案件: ${updates.isHeavyCargo ? '対象' : '非対象'}`);
