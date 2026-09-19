@@ -4,7 +4,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
-import { m365Router } from './server/m365Router';
+import { m365Router } from './routes/m365Router';
 
 dotenv.config();
 
