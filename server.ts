@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'path';
-import app from './src/server/app';
+import app from './src/server/app.ts';
 
 const PORT = 3000;
 
