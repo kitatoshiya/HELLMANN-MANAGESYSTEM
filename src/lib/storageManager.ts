@@ -1101,7 +1101,8 @@ function cleanAwbKey(awb?: string | null): string {
  */
 function createDefaultEmailLogsForShipment(s: Shipment): CustomsEmailLog[] {
   const flight = (s.flightRoute || 'NH006').split('/')[0].trim();
-  const awb = s.mawbNumber || (s as any).primaryKey || s.hawbNumber || s.id;
+  const hawbVal = s.hawbNumber ? s.hawbNumber.trim() : '';
+  const awb = hawbVal !== '' ? hawbVal : (s.mawbNumber || (s as any).primaryKey || s.id);
   const hawb = s.hawbNumber || s.id;
   const createdDate = s.createdAt ? new Date(s.createdAt) : new Date();
   const operatorName = s.assignedOperator?.name || '喜多';
@@ -1141,12 +1142,12 @@ function createDefaultEmailLogsForShipment(s: Shipment): CustomsEmailLog[] {
       'tac-hellmann@tac-japan.co.jp',
       'kita@tac-japan.co.jp',
     ],
-    subject: `${dateStr} 輸出通関依頼 ${flight} ${awb} ヘルマンシップス ${cutTimeStr}`.trim(),
+    subject: `${dateStr} 輸出通関依頼 ${flight} ${awb} サブ：ヘルマン ${cutTimeStr}`.trim(),
     body: `白名様
 
 お疲れ様です。${operatorName}です。
 
-${dateStr} 輸出通関依頼 ${flight} ${awb} ヘルマンシップス ${cutTimeStr}
+${dateStr} 輸出通関依頼 ${flight} ${awb} サブ：ヘルマン ${cutTimeStr}
 
 ${awb}
 ${s.portOfLoading || 'HND'}-${s.destination || 'DEST'}

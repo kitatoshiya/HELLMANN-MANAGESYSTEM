@@ -114,8 +114,9 @@ export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
       destStr = destStr.split(' ')[0].trim();
     }
 
-    // 3. AWB番号
-    const awbNo = (shipment as any).primaryKey || shipment.mawbNumber || shipment.hawbNumber || shipment.id || '131-25931791';
+    // 3. AWB番号 (HAWBが空白でない場合はMAWBの代わりにHAWB番号を優先反映)
+    const hawbVal = shipment.hawbNumber ? shipment.hawbNumber.trim() : '';
+    const awbNo = hawbVal !== '' ? hawbVal : ((shipment as any).primaryKey || shipment.mawbNumber || shipment.id || '131-25931791');
 
     // 4. 積地
     let polStr = shipment.portOfLoading || 'HND';
@@ -181,9 +182,9 @@ export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
 
     const formattedCutTime = formatCutTimeForSubject(shipment.cutTime);
 
-    // メールタイトルの生成法則: 通関日＋” 輸出通関依頼 ”＋フライト＋” ”＋AWB番号＋” ヘルマンシップス”［＋” ”＋カット時間］
-    // 例: 08/12 輸出通関依頼 NH006 131-25931791 ヘルマンシップス 17時カット
-    let generatedSubject = `${formattedDate} 輸出通関依頼 ${flightStr} ${awbNo} ヘルマンシップス`;
+    // メールタイトルの生成法則: 通関日＋” 輸出通関依頼 ”＋フライト＋” ”＋AWB番号（HAWB優先）＋” サブ：ヘルマン”［＋” ”＋カット時間］
+    // 例: 08/12 輸出通関依頼 NH006 S2602010942 サブ：ヘルマン 17時カット
+    let generatedSubject = `${formattedDate} 輸出通関依頼 ${flightStr} ${awbNo} サブ：ヘルマン`;
     if (formattedCutTime) {
       generatedSubject += ` ${formattedCutTime}`;
     }
@@ -297,7 +298,7 @@ ${userName}`;
             <div>
               <h3 className="text-base font-bold text-white">通関依頼メール作成</h3>
               <p className="text-xs text-slate-400">
-                AWB: <span className="font-mono text-blue-300 font-bold">{(shipment as any).primaryKey || shipment.id}</span> の通関依頼メール下書き
+                AWB: <span className="font-mono text-blue-300 font-bold">{(shipment.hawbNumber && shipment.hawbNumber.trim()) || (shipment as any).primaryKey || shipment.mawbNumber || shipment.id}</span> の通関依頼メール下書き
               </p>
             </div>
           </div>
