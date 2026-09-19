@@ -3693,17 +3693,6 @@ export async function syncM365EmailsFromGraphAPI(folder: 'inbox' | 'sent' | 'bot
     };
   }
 
-  // If M365 integration is disabled, quietly return without firing unnecessary API calls
-  if (settings.enabled === false) {
-    return {
-      success: false,
-      inboxCount: 0,
-      sentCount: 0,
-      totalSynced: 0,
-      message: 'M365連携は無効に設定されています。',
-    };
-  }
-
   try {
     const res = await fetch('/api/m365/sync', {
       method: 'POST',
