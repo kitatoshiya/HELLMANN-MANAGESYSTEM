@@ -340,6 +340,13 @@ export const DEFAULT_M365_SETTINGS: M365Settings = {
   sentSyncIntervalSeconds: 300, // デフォルト: 5分 (300秒)
   syncRetentionDays: 7, // デフォルト: 直近7日間 (0 = 全期間)
   isDemoMode: false,
+  oneDriveUserEmail: '',
+  oneDriveBasePath: '/TAC大阪IBP関連/USER/●サブエージェント/HELLMANN',
+  oneDriveAutoSaveNewOrders: true,
+  useSeparateOneDriveCredentials: true,
+  oneDriveTenantId: '',
+  oneDriveClientId: '',
+  oneDriveClientSecret: '',
 };
 
 let cachedM365Settings: M365Settings | null = null;
@@ -3782,16 +3789,17 @@ export async function sendMailViaGraphBackend(data: {
   body: string;
   isHtml?: boolean;
   attachments?: EmailAttachment[];
+  allowSimulatedSend?: boolean;
 }): Promise<{ success: boolean; isSkipped?: boolean; error?: string; message?: string }> {
   const settings = getM365Settings();
-  if (settings.isDemoMode) {
+  if (settings.isDemoMode && !data.allowSimulatedSend) {
     return {
       success: false,
       isSkipped: true,
       error: 'M365連携が「デモモード」になっているため、実際の外部メール送信は行われませんでした。',
     };
   }
-  if (!settings.tenantId || !settings.clientId) {
+  if ((!settings.tenantId || !settings.clientId) && !data.allowSimulatedSend) {
     return {
       success: false,
       isSkipped: true,
@@ -3815,6 +3823,7 @@ export async function sendMailViaGraphBackend(data: {
         body: data.body,
         isHtml: data.isHtml ?? true,
         attachments: data.attachments,
+        allowSimulatedSend: data.allowSimulatedSend ?? true,
       }),
     });
 

@@ -23,8 +23,11 @@ import {
   CornerDownRight,
   HelpCircle,
   X,
+  Folder,
+  FileSpreadsheet,
+  Upload,
 } from 'lucide-react';
-import { Shipment, CustomsQaItem, EmailAttachment, UnifiedMailItem } from '../types';
+import { Shipment, CustomsQaItem, EmailAttachment, UnifiedMailItem, OneDriveFileItem } from '../types';
 import { sanitizeEmailHtml } from '../lib/htmlSanitizer';
 import {
   addCustomsQuestion,
@@ -45,6 +48,10 @@ import {
   getHellmannNewOrders,
 } from '../lib/m365EmailService';
 import { updateShipment, cleanCustomsQas } from '../lib/storageManager';
+import {
+  listOneDriveFilesForShipment,
+  prepareEmailAttachmentsFromCloudFiles,
+} from '../lib/oneDriveService';
 import { HtmlMailEditor } from './HtmlMailEditor';
 
 interface CustomsQaRelayPanelProps {
@@ -65,6 +72,13 @@ const formatDateTime = (dateStr?: string | null): string => {
     return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
   }
   return dateStr && dateStr !== 'Invalid Date' && !dateStr.includes('NaN') ? dateStr : '-';
+};
+
+const formatFileSize = (bytes?: number): string => {
+  if (!bytes || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
@@ -127,6 +141,7 @@ export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
     ccRecipients: string;
     subject: string;
     replyText: string;
+    attachments: (EmailAttachment & { source?: 'answer' | 'local' | 'cloud' })[];
   }>({
     isOpen: false,
     qa: null,
@@ -134,7 +149,18 @@ export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
     ccRecipients: '',
     subject: '',
     replyText: '',
+    attachments: [],
   });
+
+  // Attachments State for Broker Reply Modal
+  const [isSendingBrokerReply, setIsSendingBrokerReply] = useState(false);
+  const [isAttachingFiles, setIsAttachingFiles] = useState(false);
+  const [isDragOverAttachment, setIsDragOverAttachment] = useState(false);
+  const [showCloudFilePicker, setShowCloudFilePicker] = useState(false);
+  const [cloudFilesForPicker, setCloudFilesForPicker] = useState<OneDriveFileItem[]>([]);
+  const [selectedCloudFileIds, setSelectedCloudFileIds] = useState<string[]>([]);
+  const [isLoadingCloudFiles, setIsLoadingCloudFiles] = useState(false);
+  const brokerReplyFileInputRef = useRef<HTMLInputElement>(null);
 
   // Real received emails from Microsoft 365
   const [actualEmails, setActualEmails] = useState<UnifiedMailItem[]>([]);
@@ -756,6 +782,15 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
       brokerReplyDrafts[qa.id] ||
       `${brokerSalutation}<br><br>お疲れ様です。照会いただいておりました件、ヘルマン社および荷主様より回答および関連資料を受領いたしました。<br><br>【回答内容】<br>${answerHtml}<br><br>ご確認の上、申告手続きを進めていただけますと幸いです。<br><br>${signature}${quoteHtml}`;
 
+    const initialAtts = (
+      forwardAttachmentsSelected[qa.id] !== false
+        ? qa.hellmannAnswer?.attachments || []
+        : []
+    ).map((att) => ({
+      ...att,
+      source: 'answer' as const,
+    }));
+
     setBrokerReplyModal({
       isOpen: true,
       qa,
@@ -763,39 +798,154 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
       ccRecipients: defaultCc,
       subject: defaultSubject,
       replyText: defaultBody,
+      attachments: initialAtts,
     });
+  };
+
+  const handleSelectLocalFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
+    setIsAttachingFiles(true);
+    try {
+      const newAtts: (EmailAttachment & { source: 'local' })[] = [];
+      for (const file of files) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const commaIdx = dataUrl.indexOf(',');
+        const contentBytes = commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+
+        newAtts.push({
+          id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+          fileName: file.name,
+          contentType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+          dataUrl,
+          contentBytes,
+          isPdf: file.name.toLowerCase().endsWith('.pdf'),
+          source: 'local',
+        });
+      }
+
+      setBrokerReplyModal((prev) => ({
+        ...prev,
+        attachments: [...prev.attachments, ...newAtts],
+      }));
+      showToast(`${newAtts.length}件のファイルを添付しました。`);
+    } catch (err: any) {
+      console.error('File attach error:', err);
+      alert(`ファイル添付エラー: ${err.message || 'ファイルの読み込みに失敗しました'}`);
+    } finally {
+      setIsAttachingFiles(false);
+      if (brokerReplyFileInputRef.current) {
+        brokerReplyFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleRemoveBrokerAttachment = (attId: string) => {
+    setBrokerReplyModal((prev) => ({
+      ...prev,
+      attachments: prev.attachments.filter((a) => a.id !== attId),
+    }));
+  };
+
+  const handleOpenCloudFilePicker = async () => {
+    setIsLoadingCloudFiles(true);
+    setShowCloudFilePicker(true);
+    setSelectedCloudFileIds([]);
+    try {
+      const files = await listOneDriveFilesForShipment(shipment, m365Settings);
+      setCloudFilesForPicker(files);
+    } catch (err: any) {
+      console.warn('Cloud files list error:', err);
+      setCloudFilesForPicker([]);
+    } finally {
+      setIsLoadingCloudFiles(false);
+    }
+  };
+
+  const handleConfirmCloudFiles = async () => {
+    if (selectedCloudFileIds.length === 0) {
+      setShowCloudFilePicker(false);
+      return;
+    }
+    const chosenItems = cloudFilesForPicker.filter((f) => selectedCloudFileIds.includes(f.id));
+    setIsAttachingFiles(true);
+    setShowCloudFilePicker(false);
+    try {
+      const convertedAtts = await prepareEmailAttachmentsFromCloudFiles(chosenItems);
+      const taggedAtts = convertedAtts.map((att) => ({
+        ...att,
+        source: 'cloud' as const,
+      }));
+      setBrokerReplyModal((prev) => ({
+        ...prev,
+        attachments: [...prev.attachments, ...taggedAtts],
+      }));
+      showToast(`共有ドライブから${taggedAtts.length}件の書類を添付しました。`);
+    } catch (err: any) {
+      console.error('Cloud attachment error:', err);
+      alert(`共有ドライブ書類の添付エラー: ${err.message}`);
+    } finally {
+      setIsAttachingFiles(false);
+    }
   };
 
   const confirmAndSendBrokerReply = async () => {
     if (!brokerReplyModal.qa) return;
     const qa = brokerReplyModal.qa;
 
-    const forwardAtts =
-      forwardAttachmentsSelected[qa.id] !== false ? qa.hellmannAnswer?.attachments || [] : [];
+    setIsSendingBrokerReply(true);
+    try {
+      const attachmentsToSend = brokerReplyModal.attachments;
 
-    replyToBroker(shipment.id, qa.id, {
-      replyText: brokerReplyModal.replyText,
-      forwardedAttachments: forwardAtts,
-    });
-
-    const toList = brokerReplyModal.toRecipients.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-    const ccList = brokerReplyModal.ccRecipients.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-    if (toList.length > 0) {
-      const sendResult = await sendMailViaGraphBackend({
-        toRecipients: toList,
-        ccRecipients: ccList,
-        subject: brokerReplyModal.subject,
-        body: brokerReplyModal.replyText,
-        attachments: forwardAtts,
+      replyToBroker(shipment.id, qa.id, {
+        replyText: brokerReplyModal.replyText,
+        forwardedAttachments: attachmentsToSend,
       });
 
-      if (!sendResult.success) {
-        console.warn('Backend email sending notification:', sendResult.error);
-      }
-    }
+      const toList = brokerReplyModal.toRecipients.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+      const ccList = brokerReplyModal.ccRecipients.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+      if (toList.length > 0) {
+        const sendResult = await sendMailViaGraphBackend({
+          toRecipients: toList,
+          ccRecipients: ccList,
+          subject: brokerReplyModal.subject,
+          body: brokerReplyModal.replyText,
+          attachments: attachmentsToSend,
+        });
 
-    setBrokerReplyModal({ isOpen: false, qa: null, toRecipients: '', ccRecipients: '', subject: '', replyText: '' });
-    onShipmentUpdated?.();
+        if (!sendResult.success) {
+          console.warn('Backend email sending notification:', sendResult.error);
+        }
+      }
+
+      showToast(
+        `通関士宛てに回答返信メールを送信しました${
+          attachmentsToSend.length > 0 ? ` (添付: ${attachmentsToSend.length}件)` : ''
+        }`
+      );
+      setBrokerReplyModal({
+        isOpen: false,
+        qa: null,
+        toRecipients: '',
+        ccRecipients: '',
+        subject: '',
+        replyText: '',
+        attachments: [],
+      });
+      onShipmentUpdated?.();
+    } catch (err: any) {
+      console.error('Failed to send broker reply:', err);
+      alert(`メール送信エラー: ${err.message || '送信に失敗しました'}`);
+    } finally {
+      setIsSendingBrokerReply(false);
+    }
   };
 
   const handleDownloadAttachment = (att: EmailAttachment) => {
@@ -2019,7 +2169,17 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
               </div>
               <button
                 type="button"
-                onClick={() => setBrokerReplyModal({ isOpen: false, qa: null, toRecipients: '', ccRecipients: '', subject: '', replyText: '' })}
+                onClick={() =>
+                  setBrokerReplyModal({
+                    isOpen: false,
+                    qa: null,
+                    toRecipients: '',
+                    ccRecipients: '',
+                    subject: '',
+                    replyText: '',
+                    attachments: [],
+                  })
+                }
                 className="text-slate-400 hover:text-white p-1 rounded-lg text-lg leading-none cursor-pointer"
               >
                 ✕
@@ -2081,9 +2241,192 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
                 <HtmlMailEditor
                   value={brokerReplyModal.replyText}
                   onChange={(html) => setBrokerReplyModal((prev) => ({ ...prev, replyText: html }))}
-                  rows={12}
+                  rows={10}
                   placeholder="返信本文を入力、または表（HTML）やテキストをコピペしてください..."
                 />
+              </div>
+
+              {/* 📎 添付ファイル（アタッチメント）セクション */}
+              <div className="pt-2 border-t border-slate-200">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <Paperclip className="w-4 h-4 text-emerald-600" />
+                    <span className="text-xs font-bold text-slate-800">
+                      添付ファイル (アタッチメント)
+                    </span>
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+                      {brokerReplyModal.attachments.length}件
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="file"
+                      multiple
+                      ref={brokerReplyFileInputRef}
+                      onChange={(e) => e.target.files && handleSelectLocalFiles(e.target.files)}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => brokerReplyFileInputRef.current?.click()}
+                      disabled={isAttachingFiles}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg shadow-2xs hover:border-slate-400 transition-all cursor-pointer disabled:opacity-50"
+                      title="PC内のファイル（PDF、Excel、画像等）を選択して添付"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>PCからファイル追加</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleOpenCloudFilePicker}
+                      disabled={isAttachingFiles}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+                      title="本案件の共有ドライブに保管されている書類を選択して添付"
+                    >
+                      <Folder className="w-3.5 h-3.5 text-blue-600" />
+                      <span>共有ドライブから選択</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* ドロップゾーン 兼 ファイル一覧 */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragOverAttachment(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    setIsDragOverAttachment(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragOverAttachment(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                      handleSelectLocalFiles(e.dataTransfer.files);
+                    }
+                  }}
+                  className={`border-2 border-dashed rounded-xl p-3 transition-colors ${
+                    isDragOverAttachment
+                      ? 'border-emerald-500 bg-emerald-50/50'
+                      : 'border-slate-200 bg-slate-50/60'
+                  }`}
+                >
+                  {isAttachingFiles ? (
+                    <div className="py-4 flex items-center justify-center gap-2 text-xs text-slate-500">
+                      <RefreshCw className="w-4 h-4 animate-spin text-emerald-600" />
+                      <span>ファイルを処理・添付中...</span>
+                    </div>
+                  ) : brokerReplyModal.attachments.length === 0 ? (
+                    <div
+                      onClick={() => brokerReplyFileInputRef.current?.click()}
+                      className="py-5 text-center cursor-pointer hover:bg-white/80 rounded-lg transition-colors"
+                    >
+                      <Upload className="w-6 h-6 text-slate-400 mx-auto mb-1.5" />
+                      <p className="text-xs font-bold text-slate-600">
+                        ここにファイルをドラッグ＆ドロップ、またはクリックしてPCから追加
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        PDF、Excel、Word、画像などのファイルをメールにアタッチできます
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto pr-1">
+                        {brokerReplyModal.attachments.map((att) => {
+                          const isExcel =
+                            att.fileName.toLowerCase().endsWith('.xlsx') ||
+                            att.fileName.toLowerCase().endsWith('.xls') ||
+                            att.fileName.toLowerCase().endsWith('.csv');
+                          const isPdf =
+                            att.isPdf || att.fileName.toLowerCase().endsWith('.pdf');
+                          return (
+                            <div
+                              key={att.id}
+                              className="flex items-center justify-between p-2 bg-white border border-slate-200 rounded-lg shadow-2xs hover:border-slate-300 transition-colors gap-2"
+                            >
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <div className="shrink-0">
+                                  {isExcel ? (
+                                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                                  ) : isPdf ? (
+                                    <FileText className="w-4 h-4 text-rose-600" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-blue-600" />
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <span
+                                    className="text-xs font-bold text-slate-800 truncate block"
+                                    title={att.fileName}
+                                  >
+                                    {att.fileName}
+                                  </span>
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                                    <span>{formatFileSize(att.sizeBytes)}</span>
+                                    {att.source === 'local' && (
+                                      <span className="px-1.5 py-0.2 text-[9px] font-medium bg-slate-100 text-slate-600 rounded border border-slate-200">
+                                        PC追加
+                                      </span>
+                                    )}
+                                    {att.source === 'cloud' && (
+                                      <span className="px-1.5 py-0.2 text-[9px] font-medium bg-blue-50 text-blue-700 rounded border border-blue-200">
+                                        共有ドライブ
+                                      </span>
+                                    )}
+                                    {att.source === 'answer' && (
+                                      <span className="px-1.5 py-0.2 text-[9px] font-medium bg-emerald-50 text-emerald-700 rounded border border-emerald-200">
+                                        回答添付
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1 shrink-0">
+                                {(att.dataUrl || att.downloadUrl) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDownloadAttachment(att)}
+                                    className="p-1 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                                    title="ダウンロード"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveBrokerAttachment(att.id)}
+                                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                                  title="添付から除外"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1 px-1 text-[11px] text-slate-500">
+                        <span className="text-[10px] text-slate-400">
+                          ※ドラッグ＆ドロップでさらにファイルを追加できます
+                        </span>
+                        <span className="font-mono text-[11px] font-semibold text-slate-600">
+                          合計:{' '}
+                          {formatFileSize(
+                            brokerReplyModal.attachments.reduce(
+                              (acc, a) => acc + (a.sizeBytes || 0),
+                              0
+                            )
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -2091,18 +2434,139 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
             <div className="bg-slate-50 border-t border-slate-200 p-4 px-6 flex items-center justify-end space-x-3">
               <button
                 type="button"
-                onClick={() => setBrokerReplyModal({ isOpen: false, qa: null, toRecipients: '', ccRecipients: '', subject: '', replyText: '' })}
-                className="px-4 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                disabled={isSendingBrokerReply}
+                onClick={() =>
+                  setBrokerReplyModal({
+                    isOpen: false,
+                    qa: null,
+                    toRecipients: '',
+                    ccRecipients: '',
+                    subject: '',
+                    replyText: '',
+                    attachments: [],
+                  })
+                }
+                className="px-4 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
               >
                 キャンセル
               </button>
               <button
                 type="button"
+                disabled={isSendingBrokerReply || isAttachingFiles}
                 onClick={confirmAndSendBrokerReply}
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95 disabled:opacity-50"
               >
-                <Send className="w-3.5 h-3.5" />
-                <span>内容を確認して通関士へ送信</span>
+                {isSendingBrokerReply ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>メール送信中...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5" />
+                    <span>
+                      内容を確認して通関士へ送信
+                      {brokerReplyModal.attachments.length > 0
+                        ? ` (添付${brokerReplyModal.attachments.length}件)`
+                        : ''}
+                    </span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 📁 共有ドライブ書類選択モーダル */}
+      {showCloudFilePicker && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-60 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="bg-slate-900 text-white p-4 px-6 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Folder className="w-5 h-5 text-blue-400" />
+                <h3 className="font-bold text-sm text-white">
+                  共有ドライブから添付書類を選択
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCloudFilePicker(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg text-base leading-none cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto space-y-2 flex-1">
+              <p className="text-xs text-slate-600">
+                本案件（HAWB: {shipment.hawbNumber || shipment.id}）の共有ドライブフォルダから添付したい書類を選択してください:
+              </p>
+
+              {isLoadingCloudFiles ? (
+                <div className="py-12 flex flex-col items-center justify-center gap-2 text-xs text-slate-400">
+                  <RefreshCw className="w-5 h-5 animate-spin text-blue-600" />
+                  <span>共有ドライブからファイル一覧を取得中...</span>
+                </div>
+              ) : cloudFilesForPicker.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
+                  共有ドライブに書類が見つかりませんでした。
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                  {cloudFilesForPicker.map((file) => {
+                    const isChecked = selectedCloudFileIds.includes(file.id);
+                    return (
+                      <label
+                        key={file.id}
+                        className={`flex items-center justify-between p-2.5 rounded-xl border transition-all cursor-pointer ${
+                          isChecked
+                            ? 'bg-blue-50/80 border-blue-400 shadow-2xs'
+                            : 'bg-white border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              setSelectedCloudFileIds((prev) =>
+                                isChecked ? prev.filter((id) => id !== file.id) : [...prev, file.id]
+                              );
+                            }}
+                            className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-bold text-slate-800 truncate block">
+                              {file.name}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {formatFileSize(file.size)}
+                            </span>
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-50 border-t border-slate-200 p-3 px-6 flex items-center justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setShowCloudFilePicker(false)}
+                className="px-3.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                disabled={selectedCloudFileIds.length === 0}
+                onClick={handleConfirmCloudFiles}
+                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                選択した{selectedCloudFileIds.length > 0 ? `${selectedCloudFileIds.length}件を` : ''}アタッチ
               </button>
             </div>
           </div>

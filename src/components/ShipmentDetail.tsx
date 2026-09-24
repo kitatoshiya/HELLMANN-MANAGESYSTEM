@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
-import { Shipment, Task, TaskStatus, User, ActivityLog, Operator, MilestoneKey, MilestoneState } from '../types';
+import { Shipment, Task, TaskStatus, User, ActivityLog, Operator, MilestoneKey, MilestoneState, OneDriveFileItem } from '../types';
 import {
   updateTaskStatus,
   assignTask,
@@ -27,7 +27,8 @@ import { fetchAllTaskMasters, getLocalTaskMasters } from '../lib/taskMasterServi
 import { isHeavyShipment, isImportantShipment } from '../lib/awbUtils';
 import { TaskMaster } from '../types';
 import { CustomsQaRelayPanel } from './CustomsQaRelayPanel';
-import { getCustomsQaStatusBadgeInfo } from '../lib/m365EmailService';
+import { OneDriveDocumentManager } from './OneDriveDocumentManager';
+import { getCustomsQaStatusBadgeInfo, getM365Settings } from '../lib/m365EmailService';
 import {
   ArrowLeft,
   Plane,
@@ -58,6 +59,7 @@ import {
   Edit2,
   Mail,
   FileUp,
+  Folder,
   Flag,
   ChevronUp,
   ChevronDown,
@@ -88,10 +90,12 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [showAddTask, setShowAddTask] = useState(false);
-  const [activeTab, setActiveTab] = useState<'tasks' | 'comments' | 'logs' | 'customs_qa'>('tasks');
+  const [activeTab, setActiveTab] = useState<'tasks' | 'comments' | 'logs' | 'customs_qa' | 'onedrive_docs'>('tasks');
   const [showZoomModal, setShowZoomModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
+  const [isDirectSendEmail, setIsDirectSendEmail] = useState(false);
+  const [emailSelectedDocs, setEmailSelectedDocs] = useState<OneDriveFileItem[] | null>(null);
   const [showCustomsQaModal, setShowCustomsQaModal] = useState(false);
   const [showDeleteShipmentConfirm, setShowDeleteShipmentConfirm] = useState(false);
   const [showCompleteAllModal, setShowCompleteAllModal] = useState(false);
@@ -99,6 +103,18 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
   const detailFileInputRef = React.useRef<HTMLInputElement>(null);
   const [isUploadingDetailPdf, setIsUploadingDetailPdf] = useState(false);
   const currentUser = getCurrentUser();
+  const m365Settings = getM365Settings();
+  const isGoogleDrive = m365Settings.storageProvider === 'googledrive';
+
+  const handleNavigateToOneDriveDocs = () => {
+    setActiveTab('onedrive_docs');
+    setTimeout(() => {
+      const section = document.getElementById('main-tabs-section');
+      if (section) {
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 60);
+  };
 
   const handleHeaderPdfReuploadClick = () => {
     if (detailFileInputRef.current) {
@@ -521,6 +537,19 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
 
         <div className="flex items-center space-x-3">
           <button
+            onClick={handleNavigateToOneDriveDocs}
+            className={`inline-flex items-center px-3.5 py-2 text-xs font-bold rounded-xl transition-all shadow-2xs cursor-pointer border ${
+              activeTab === 'onedrive_docs'
+                ? 'bg-blue-600 text-white border-blue-600 shadow-md ring-2 ring-blue-400/30'
+                : 'text-sky-900 bg-sky-50 hover:bg-sky-100 border-sky-300 hover:border-sky-400'
+            }`}
+            title="共有ドライブに保管されている通関書類（PDF/Excel/判定書/指示書）を表示・該当セクションへスクロール"
+          >
+            <Folder className="w-4 h-4 mr-1.5 text-sky-600" />
+            <span>📁 共有ドライブ書類</span>
+          </button>
+
+          <button
             onClick={handleHeaderPdfReuploadClick}
             disabled={isUploadingDetailPdf}
             className="inline-flex items-center px-3.5 py-2 text-xs font-bold text-indigo-900 bg-indigo-100 hover:bg-indigo-200 border border-indigo-300 rounded-xl transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
@@ -531,7 +560,11 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
           </button>
 
           <button
-            onClick={() => setShowEmailModal(true)}
+            onClick={() => {
+              setEmailSelectedDocs(null);
+              setIsDirectSendEmail(false);
+              setShowEmailModal(true);
+            }}
             className="inline-flex items-center px-3.5 py-2 text-xs font-bold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-colors shadow-2xs cursor-pointer"
             title="通関依頼メールのタイトル・本文を自働作成"
           >
@@ -1182,6 +1215,18 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
             >
               <FileCheck className="w-4 h-4" />
               <span>作業タスク工程一覧 ({totalCount})</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('onedrive_docs')}
+              className={`pb-3 text-xs font-bold border-b-2 transition-all flex items-center space-x-2 shrink-0 cursor-pointer ${
+                activeTab === 'onedrive_docs'
+                  ? 'border-blue-600 text-blue-700 font-extrabold'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Folder className="w-4 h-4 text-blue-600" />
+              <span>📁 共有ドライブ通関書類保管</span>
             </button>
 
             <button
@@ -1952,6 +1997,20 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
               }}
             />
           )}
+
+          {/* ONEDRIVE DOCUMENT STORAGE & MANAGER */}
+          {activeTab === 'onedrive_docs' && (
+            <div className="p-6">
+              <OneDriveDocumentManager
+                shipment={shipment}
+                onOpenCustomsEmailWithDocs={(selected) => {
+                  setEmailSelectedDocs(selected);
+                  setIsDirectSendEmail(true);
+                  setShowEmailModal(true);
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
       {/* PDF Zoom Modal */}
@@ -2109,8 +2168,19 @@ export const ShipmentDetail: React.FC<ShipmentDetailProps> = ({
       {/* Customs Email Modal */}
       {showEmailModal && (
         <CustomsEmailModal
+          key={isDirectSendEmail ? `direct-${emailSelectedDocs ? emailSelectedDocs.map((d) => d.id).join(',') : 'none'}` : 'standard-draft'}
           shipment={shipment}
-          onClose={() => setShowEmailModal(false)}
+          isDirectSend={isDirectSendEmail}
+          initialSelectedFileIds={isDirectSendEmail && emailSelectedDocs ? emailSelectedDocs.map((f) => f.id) : []}
+          initialSelectedFiles={isDirectSendEmail && emailSelectedDocs ? emailSelectedDocs : []}
+          onClose={() => {
+            setShowEmailModal(false);
+            setEmailSelectedDocs(null);
+            setIsDirectSendEmail(false);
+          }}
+          onSentSuccess={() => {
+            refreshData();
+          }}
         />
       )}
 

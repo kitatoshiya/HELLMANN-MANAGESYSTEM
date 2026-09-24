@@ -269,6 +269,50 @@ export interface M365Settings {
   syncRetentionStartDate?: string; // メール同期・表示対象の開始日付 (YYYY-MM-DD・任意指定日以降)
   syncRetentionMode?: 'days' | 'date'; // 期間指定モード ('days': 日数指定, 'date': 日付指定)
   isDemoMode: boolean; // 実APIキー未設定でもUIを完全動作確認できるデモ/シミュレーター機能
+  // ストレージプロバイダー選択 ('onedrive' | 'googledrive')
+  storageProvider?: 'onedrive' | 'googledrive';
+  // OneDrive 通関書類保管連携設定
+  oneDriveUserEmail?: string; // 保管先ユーザー (空欄時はgroupEmailまたはuserPrincipalName)
+  oneDriveBasePath?: string; // 基本保存先 (初期値: /TAC大阪IBP関連/USER/●サブエージェント/HELLMANN)
+  oneDriveAutoSaveNewOrders?: boolean; // 新着通関依頼メールの添付書類を自動保管
+  useSeparateOneDriveCredentials?: boolean; // メール用と異なるOneDrive専用テナント・クライアント認証情報を使用
+  oneDriveTenantId?: string; // OneDrive専用 テナントID
+  oneDriveClientId?: string; // OneDrive専用 クライアントID
+  oneDriveClientSecret?: string; // OneDrive専用 クライアントシークレット
+  // Google ドライブ 通関書類保管連携設定 (Google Workspace / 個人)
+  googleDriveAuthMode?: 'service_account' | 'api_key'; // 認証方式 ('service_account' | 'api_key')
+  googleDriveServiceAccountEmail?: string; // サービスアカウントのメールアドレス (client_email)
+  googleDrivePrivateKey?: string; // サービスアカウントの秘密鍵 (private_key PEM)
+  googleDriveServiceAccountKeyJson?: string; // サービスアカウント JSON ファイル全体（ペースト用）
+  googleDriveApiKey?: string; // Google Drive API Key (公開フォルダ等の読み取り用)
+  googleDriveRootFolderId?: string; // ルートフォルダID (またはフォルダURL / フォルダ名 e.g. HELLMANN)
+  googleDriveBasePath?: string; // 基本保管フォルダ名 (初期値: HELLMANN)
+  googleDriveUserEmail?: string; // Google Workspace 委任先ユーザーメール (任意)
+  googleDriveAutoSaveNewOrders?: boolean; // 新着メール添付をGoogleドライブへ自動保存
+}
+
+export type OneDriveDocType =
+  | 'INVOICE'
+  | 'NON_APPLICABLE_CERT'
+  | 'PACKING_LIST'
+  | 'CUSTOMS_DECLARATION'
+  | 'SI'
+  | 'OTHER';
+
+export interface OneDriveFileItem {
+  id: string;
+  name: string;
+  docType: OneDriveDocType;
+  size: number;
+  webUrl?: string;
+  downloadUrl?: string;
+  lastModified: string;
+  contentType?: string;
+  folderPath: string;
+  subfolder?: string; // サブフォルダ名 (例: "K")
+  isFolder?: boolean;
+  isUploadedToGraph?: boolean;
+  dataBase64?: string;
 }
 
 export interface BillingItem {

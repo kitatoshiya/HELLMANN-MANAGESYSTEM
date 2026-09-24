@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, Copy, Check, X, Send, FileText, ExternalLink, Settings } from 'lucide-react';
-import { Shipment } from '../types';
+import { Mail, Copy, Check, X, Send, FileText, ExternalLink, Settings, Folder, CheckSquare, Square, Download, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Shipment, OneDriveFileItem, EmailAttachment } from '../types';
 import { getCurrentUser, addCustomsEmailLog } from '../lib/storageManager';
+import { listOneDriveFilesForShipment, getShipmentOneDriveFolderPath, downloadOrPreviewOneDriveFile, prepareEmailAttachmentsFromCloudFiles } from '../lib/oneDriveService';
+import { getM365Settings, sendMailViaGraphBackend } from '../lib/m365EmailService';
 import { useAuth } from '../lib/AuthContext';
 
 type MailerType = 'default' | 'gmail' | 'outlook';
@@ -11,16 +13,27 @@ interface CustomsEmailModalProps {
   shipment: Shipment | null;
   onClose: () => void;
   operatorName?: string;
+  initialSelectedFileIds?: string[];
+  initialSelectedFiles?: OneDriveFileItem[];
+  isDirectSend?: boolean; // When true: directly sends email from the system without opening Gmail
+  onSentSuccess?: () => void;
 }
 
 export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
   shipment,
   onClose,
   operatorName,
+  initialSelectedFileIds,
+  initialSelectedFiles,
+  isDirectSend = false,
+  onSentSuccess,
 }) => {
   const { currentOperator, currentUser: authUser } = useAuth();
   const localUser = getCurrentUser();
   const effectiveUser = authUser || localUser;
+  const settings = getM365Settings();
+  const isGoogleDrive = (settings.storageProvider || 'onedrive') === 'googledrive';
+  const providerName = '共有ドライブ';
 
   // ログインユーザー名（operatorName > currentOperator.name > authUser.displayName > localUser.displayName > '担当者'）
   const loggedInUserName =
@@ -56,6 +69,36 @@ export const CustomsEmailModal: React.FC<CustomsEmailModalProps> = ({
   const [copiedSubject, setCopiedSubject] = useState(false);
   const [copiedBody, setCopiedBody] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [sendStatusMessage, setSendStatusMessage] = useState('');
+
+  const [oneDriveFiles, setOneDriveFiles] = useState<OneDriveFileItem[]>(
+    () => initialSelectedFiles || []
+  );
+
+  // When isDirectSend is false (e.g. top button), do NOT attach files by default
+  const [selectedOneDriveFileIds, setSelectedOneDriveFileIds] = useState<string[]>(() => {
+    if (isDirectSend && initialSelectedFileIds !== undefined) {
+      return initialSelectedFileIds;
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    if (shipment && isDirectSend) {
+      listOneDriveFilesForShipment(shipment).then((files) => {
+        setOneDriveFiles(files);
+        if (initialSelectedFileIds !== undefined && initialSelectedFileIds.length > 0) {
+          setSelectedOneDriveFileIds(initialSelectedFileIds);
+        } else if (initialSelectedFiles && initialSelectedFiles.length > 0) {
+          setSelectedOneDriveFileIds(initialSelectedFiles.map((f) => f.id));
+        }
+      });
+    } else {
+      setOneDriveFiles([]);
+      setSelectedOneDriveFileIds([]);
+    }
+  }, [shipment?.id, isDirectSend]);
 
   const [mailerType, setMailerType] = useState<MailerType>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -249,6 +292,7 @@ ${userName}`;
   const handleOpenMailer = () => {
     // Record outgoing email log to storage
     if (shipment) {
+      const selectedFiles = oneDriveFiles.filter((f) => selectedOneDriveFileIds.includes(f.id));
       addCustomsEmailLog({
         shipmentId: shipment.id,
         mawbNumber: shipment.mawbNumber,
@@ -266,6 +310,14 @@ ${userName}`;
         ccRecipients: ccAddress.split(';').map((e) => e.trim()).filter(Boolean),
         subject,
         body,
+        attachments: selectedFiles.map((f) => ({
+          id: f.id,
+          fileName: f.name,
+          sizeBytes: f.size,
+          contentType: f.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
+          downloadUrl: f.downloadUrl || f.webUrl,
+          isPdf: f.name.toLowerCase().endsWith('.pdf'),
+        })),
       });
     }
 
@@ -286,19 +338,112 @@ ${userName}`;
     }
   };
 
+  const handleDirectSend = async () => {
+    if (!shipment) return;
+    setIsSending(true);
+    setSendStatusMessage('添付ファイルを準備中...');
+
+    try {
+      const selectedFiles = oneDriveFiles.filter((f) => selectedOneDriveFileIds.includes(f.id));
+
+      // Fetch and prepare real base64 attachments
+      let attachments: EmailAttachment[] = [];
+      if (selectedFiles.length > 0) {
+        setSendStatusMessage(`${providerName}から書類（${selectedFiles.length}件）を取得中...`);
+        attachments = await prepareEmailAttachmentsFromCloudFiles(selectedFiles);
+      }
+
+      setSendStatusMessage('通関士宛てにメールを直接送信中...');
+
+      const toList = toAddress.split(';').map((e) => e.trim()).filter(Boolean);
+      const ccList = ccAddress.split(';').map((e) => e.trim()).filter(Boolean);
+
+      const sendResult = await sendMailViaGraphBackend({
+        toRecipients: toList,
+        ccRecipients: ccList,
+        subject,
+        body,
+        isHtml: false,
+        attachments,
+        allowSimulatedSend: true,
+      });
+
+      // Add to local / firestore email history log with attachments
+      addCustomsEmailLog({
+        shipmentId: shipment.id,
+        mawbNumber: shipment.mawbNumber,
+        hawbNumber: shipment.hawbNumber || undefined,
+        threadId: `thread_${shipment.mawbNumber || shipment.id}`,
+        direction: 'OUTGOING',
+        type: 'CUSTOMS_REQUEST',
+        status: 'SENT',
+        sentOrReceivedAt: new Date().toISOString(),
+        sender: {
+          name: `${loggedInUserName} (通関チーム)`,
+          email: currentUser?.email || 'tsukan@customs.logistics.co.jp',
+        },
+        toRecipients: toList,
+        ccRecipients: ccList,
+        subject,
+        body,
+        attachments,
+      });
+
+      setIsSending(false);
+
+      const attachText =
+        attachments.length > 0
+          ? `\n\n【添付書類 (${attachments.length}件)】\n` +
+            attachments.map((a) => `・${a.fileName}`).join('\n')
+          : '';
+      alert(
+        `【送信完了】\n本システムから通関士（白名様）宛てに直接メールを送信しました！\n宛先: ${toList.join(', ')}${attachText}`
+      );
+
+      onSentSuccess?.();
+      onClose();
+    } catch (err: any) {
+      console.error('Direct email send failed:', err);
+      setIsSending(false);
+      alert(`メール直接送信中にエラーが発生しました: ${err.message || '通信エラー'}`);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4 overflow-y-auto">
       <div className="bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 my-8">
         {/* Header */}
         <div className="bg-slate-800/90 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
           <div className="flex items-center space-x-2.5">
-            <div className="p-2 bg-blue-600/20 text-blue-400 rounded-xl border border-blue-500/30">
-              <Mail className="w-5 h-5" />
+            <div
+              className={`p-2 rounded-xl border ${
+                isDirectSend
+                  ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/30'
+                  : 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30'
+              }`}
+            >
+              {isDirectSend ? <Send className="w-5 h-5" /> : <Mail className="w-5 h-5" />}
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">通関依頼メール作成</h3>
-              <p className="text-xs text-slate-400">
-                AWB: <span className="font-mono text-blue-300 font-bold">{(shipment.hawbNumber && shipment.hawbNumber.trim()) || (shipment as any).primaryKey || shipment.mawbNumber || shipment.id}</span> の通関依頼メール下書き
+              <h3 className="text-base font-bold text-white">
+                {isDirectSend ? '通関士宛てメール直接送信（書類添付）' : '通関依頼メール作成'}
+              </h3>
+              <p className="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
+                <span>AWB:</span>
+                <span className="font-mono text-blue-300 font-bold">
+                  {(shipment.hawbNumber && shipment.hawbNumber.trim()) ||
+                    (shipment as any).primaryKey ||
+                    shipment.mawbNumber ||
+                    shipment.id}
+                </span>
+                {isDirectSend ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.2 bg-emerald-950 text-emerald-300 border border-emerald-800 rounded-full font-bold text-[11px]">
+                    <CheckCircle2 className="w-3 h-3" />
+                    システムから直接送信（Gmail画面は開きません）
+                  </span>
+                ) : (
+                  <span className="text-slate-400 text-[11px]">（下書き作成・メーラー選択）</span>
+                )}
               </p>
             </div>
           </div>
@@ -312,48 +457,59 @@ ${userName}`;
 
         {/* Modal Body */}
         <div className="p-6 space-y-5 text-sm">
-          {/* Mailer Selector Bar (Per User Preference) */}
-          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center space-x-2">
-              <Settings className="w-4 h-4 text-blue-400" />
-              <span className="text-xs font-bold text-slate-300">起動メールソフト (個人設定):</span>
+          {/* Mode-specific Top Bar */}
+          {isDirectSend ? (
+            <div className="bg-emerald-950/60 border border-emerald-500/40 p-3 rounded-xl flex items-start gap-2.5 text-emerald-200">
+              <Send className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+              <div className="text-xs leading-relaxed">
+                <span className="font-bold text-emerald-300">システム直接送信モード:</span>{' '}
+                指定した書類（{selectedOneDriveFileIds.length}件）を添付した状態で、本システムから直接通関士宛てにメールを送信します。Gmail画面等の外部アプリは開きません。
+              </div>
             </div>
-            <div className="flex items-center space-x-1.5 bg-slate-900 p-1 rounded-lg border border-slate-800">
-              <button
-                type="button"
-                onClick={() => handleMailerChange('default')}
-                className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
-                  mailerType === 'default'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                標準アプリ (mailto)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleMailerChange('gmail')}
-                className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
-                  mailerType === 'gmail'
-                    ? 'bg-red-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Gmail
-              </button>
-              <button
-                type="button"
-                onClick={() => handleMailerChange('outlook')}
-                className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
-                  mailerType === 'outlook'
-                    ? 'bg-sky-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Outlook
-              </button>
+          ) : (
+            /* Mailer Selector Bar (Per User Preference) for standard draft creation */
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center space-x-2">
+                <Settings className="w-4 h-4 text-blue-400" />
+                <span className="text-xs font-bold text-slate-300">起動メールソフト (個人設定):</span>
+              </div>
+              <div className="flex items-center space-x-1.5 bg-slate-900 p-1 rounded-lg border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => handleMailerChange('default')}
+                  className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
+                    mailerType === 'default'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  標準アプリ (mailto)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMailerChange('gmail')}
+                  className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
+                    mailerType === 'gmail'
+                      ? 'bg-red-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Gmail
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMailerChange('outlook')}
+                  className={`px-3 py-1 text-xs rounded-md font-bold transition-all cursor-pointer ${
+                    mailerType === 'outlook'
+                      ? 'bg-sky-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Outlook
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* To Field (宛先) */}
           <div className="space-y-1.5">
@@ -416,6 +572,79 @@ ${userName}`;
               className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
+
+          {/* Cloud Document Attachments Selector (Only shown in Direct Send mode) */}
+          {isDirectSend && oneDriveFiles.length > 0 && (
+            <div className="bg-slate-950 p-3 rounded-xl border border-blue-900/60 space-y-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="text-xs font-bold text-blue-300 flex items-center gap-1.5">
+                  <Folder className="w-3.5 h-3.5 text-blue-400" />
+                  <span>📁 {providerName}保管書類から添付選択:</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    {selectedOneDriveFileIds.length} / {oneDriveFiles.length} 件選択中
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedOneDriveFileIds.length === oneDriveFiles.length) {
+                        setSelectedOneDriveFileIds([]);
+                      } else {
+                        setSelectedOneDriveFileIds(oneDriveFiles.map((f) => f.id));
+                      }
+                    }}
+                    className="text-[11px] text-blue-400 hover:text-blue-300 underline cursor-pointer px-1"
+                  >
+                    {selectedOneDriveFileIds.length === oneDriveFiles.length ? '全解除' : '全選択'}
+                  </button>
+                  {selectedOneDriveFileIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const toDownload = oneDriveFiles.filter((f) => selectedOneDriveFileIds.includes(f.id));
+                        toDownload.forEach((f) => downloadOrPreviewOneDriveFile(f));
+                      }}
+                      className="text-[11px] text-emerald-400 hover:text-emerald-300 flex items-center gap-0.5 cursor-pointer ml-1"
+                      title="選択した書類を一括ダウンロード"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>ダウンロード</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                {oneDriveFiles.map((file) => {
+                  const isChecked = selectedOneDriveFileIds.includes(file.id);
+                  return (
+                    <label
+                      key={file.id}
+                      className={`flex items-center space-x-2 p-2 rounded-lg border text-xs cursor-pointer select-none transition-all ${
+                        isChecked
+                          ? 'bg-blue-950/60 border-blue-500 text-blue-100 font-bold shadow-xs'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {
+                          setSelectedOneDriveFileIds((prev) =>
+                            prev.includes(file.id) ? prev.filter((id) => id !== file.id) : [...prev, file.id]
+                          );
+                        }}
+                        className="rounded text-blue-500 focus:ring-blue-400 w-3.5 h-3.5 cursor-pointer"
+                      />
+                      <span className="truncate flex-1" title={file.name}>
+                        {file.name}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Body Field */}
           <div className="space-y-1.5">
@@ -501,34 +730,58 @@ ${userName}`;
             >
               閉じる
             </button>
-            <button
-              type="button"
-              onClick={handleOpenMailer}
-              className={`px-4 py-2 font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-lg transition-all cursor-pointer text-white ${
-                mailerType === 'gmail'
-                  ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30'
-                  : mailerType === 'outlook'
-                  ? 'bg-sky-600 hover:bg-sky-500 shadow-sky-600/30'
-                  : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/30'
-              }`}
-            >
-              {mailerType === 'gmail' ? (
-                <>
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Gmailで開く</span>
-                </>
-              ) : mailerType === 'outlook' ? (
-                <>
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Outlookで開く</span>
-                </>
-              ) : (
-                <>
-                  <Send className="w-4 h-4" />
-                  <span>既定のメールアプリで開く</span>
-                </>
-              )}
-            </button>
+            {isDirectSend ? (
+              <button
+                type="button"
+                disabled={isSending}
+                onClick={handleDirectSend}
+                className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl inline-flex items-center gap-2 shadow-lg shadow-emerald-900/40 transition-all cursor-pointer"
+              >
+                {isSending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{sendStatusMessage || '送信中...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-4 h-4" />
+                    <span>
+                      このシステムから直接メールを送信
+                      {selectedOneDriveFileIds.length > 0 && `（添付 ${selectedOneDriveFileIds.length} 件）`}
+                    </span>
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleOpenMailer}
+                className={`px-4 py-2 font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-lg transition-all cursor-pointer text-white ${
+                  mailerType === 'gmail'
+                    ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30'
+                    : mailerType === 'outlook'
+                    ? 'bg-sky-600 hover:bg-sky-500 shadow-sky-600/30'
+                    : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/30'
+                }`}
+              >
+                {mailerType === 'gmail' ? (
+                  <>
+                    <ExternalLink className="w-4 h-4" />
+                    <span>Gmailで開く</span>
+                  </>
+                ) : mailerType === 'outlook' ? (
+                  <>
+                    <ExternalLink className="w-4 h-4" />
+                    <span>Outlookで開く</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-4 h-4" />
+                    <span>既定のメールアプリで開く</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>

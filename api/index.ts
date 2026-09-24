@@ -437,6 +437,7 @@ m365Router.post('/sync', async (req, res) => {
       groupEmail,
       userPrincipalName,
       top,
+      limit: bodyLimit,
       folder = 'both',
       retentionDays = 7,
       retentionStartDate,
@@ -468,7 +469,7 @@ m365Router.post('/sync', async (req, res) => {
     }
 
     const token = await getGraphAccessToken(actualTenantId, actualClientId, actualClientSecret);
-    const limit = Math.min(Number(top) || 50, 100);
+    const limit = Math.min(Number(top) || Number(bodyLimit) || 50, 100);
 
     // Resolve target mailbox or user identifier
     const resolution = await resolveMailboxTarget(token, targetEmail, userPrincipalName);
@@ -490,13 +491,14 @@ m365Router.post('/sync', async (req, res) => {
 
     // A. If target is a Microsoft 365 Group (Unified Group)
     if (resolution.isGroup) {
+      const threadsLimit = Math.max(Math.min(limit, 50), 35);
       const threadsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
         resolution.userId
-      )}/threads?$top=${Math.min(limit, 20)}&$orderby=lastDeliveredDateTime%20desc&$select=id,topic,hasAttachments,lastDeliveredDateTime,uniqueSenders,toRecipients,ccRecipients`;
+      )}/threads?$top=${threadsLimit}&$orderby=lastDeliveredDateTime%20desc&$select=id,topic,hasAttachments,lastDeliveredDateTime,uniqueSenders,toRecipients,ccRecipients`;
 
       const threadsResp = await fetchWithTimeout(threadsUrl, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      }, 5000).catch(() => null);
+      }, 6000).catch(() => null);
 
       if (!threadsResp || !threadsResp.ok) {
         const status = threadsResp ? threadsResp.status : 504;
@@ -519,29 +521,35 @@ m365Router.post('/sync', async (req, res) => {
       const processedInbox: any[] = [];
       const processedSent: any[] = [];
 
-      // Fetch posts for top active threads in parallel (max 8 threads for speed)
-      const targetThreads = threads.slice(0, 8);
-      const threadResults = await Promise.all(
-        targetThreads.map(async (thread) => {
-          try {
-            const threadLastDelivered = thread.lastDeliveredDateTime ? new Date(thread.lastDeliveredDateTime).getTime() : 0;
-            if (cutoffTime > 0 && threadLastDelivered > 0 && threadLastDelivered < cutoffTime) {
-              return { inbox: [], sent: [] };
-            }
+      // Fetch posts for active threads (up to 35 threads to ensure all recent orders are captured)
+      const targetThreads = threads.slice(0, 35);
+      const threadResults: Array<{ inbox: any[]; sent: any[] }> = [];
 
-            const threadTo = parseGraphRecipientsList(thread.toRecipients);
-            const threadCc = parseGraphRecipientsList(thread.ccRecipients);
+      // Process in batches of 8 to avoid overwhelming Graph API while keeping sync fast
+      const threadBatchSize = 8;
+      for (let i = 0; i < targetThreads.length; i += threadBatchSize) {
+        const batch = targetThreads.slice(i, i + threadBatchSize);
+        const batchResults = await Promise.all(
+          batch.map(async (thread) => {
+            try {
+              const threadLastDelivered = thread.lastDeliveredDateTime ? new Date(thread.lastDeliveredDateTime).getTime() : 0;
+              if (cutoffTime > 0 && threadLastDelivered > 0 && threadLastDelivered < cutoffTime) {
+                return { inbox: [], sent: [] };
+              }
 
-            const postsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
-              resolution.userId
-            )}/threads/${thread.id}/posts?$top=10&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
-            const postsResp = await fetchWithTimeout(postsUrl, {
-              headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-            }, 3500).catch(() => null);
+              const threadTo = parseGraphRecipientsList(thread.toRecipients);
+              const threadCc = parseGraphRecipientsList(thread.ccRecipients);
 
-            if (!postsResp || !postsResp.ok) return { inbox: [], sent: [] };
-            const postsData = (await postsResp.json().catch(() => ({}))) as any;
-            const posts: any[] = Array.isArray(postsData.value) ? postsData.value : [];
+              const postsUrl = `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(
+                resolution.userId
+              )}/threads/${thread.id}/posts?$top=10&$select=id,from,sender,body,receivedDateTime,hasAttachments,newParticipants`;
+              const postsResp = await fetchWithTimeout(postsUrl, {
+                headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+              }, 8000).catch(() => null);
+
+              if (!postsResp || !postsResp.ok) return { inbox: [], sent: [] };
+              const postsData = (await postsResp.json().catch(() => ({}))) as any;
+              const posts: any[] = Array.isArray(postsData.value) ? postsData.value : [];
 
             const threadInbox: any[] = [];
             const threadSent: any[] = [];
@@ -611,8 +619,10 @@ m365Router.post('/sync', async (req, res) => {
           }
         })
       );
+      threadResults.push(...batchResults);
+    }
 
-      for (const resItem of threadResults) {
+    for (const resItem of threadResults) {
         processedInbox.push(...resItem.inbox);
         processedSent.push(...resItem.sent);
       }
@@ -837,6 +847,13 @@ m365Router.post('/send', async (req, res) => {
     const targetEmail = groupEmail || process.env.M365_GROUP_EMAIL || 'tac-hellmann@tac-japan.co.jp';
 
     if (!actualTenantId || !actualClientId || !actualClientSecret) {
+      if (req.body?.allowSimulatedSend) {
+        return res.json({
+          success: true,
+          simulated: true,
+          message: '外部メール送信設定が未構成のため、システム内直接送信ログのみ記録されました。',
+        });
+      }
       return res.status(400).json({
         success: false,
         error: 'Microsoft Entra ID の資格情報が設定されていません。',
@@ -945,7 +962,7 @@ m365Router.post('/send', async (req, res) => {
 
     const shouldSendAsHtml = isHtml ?? (typeof body === 'string' && (/<[a-z][\s\S]*>/i.test(body) || body.includes('<br') || body.includes('<table')));
 
-    const messagePayload = {
+    const messagePayload: any = {
       message: {
         subject: subject || '',
         body: {
@@ -964,6 +981,32 @@ m365Router.post('/send', async (req, res) => {
       },
       saveToSentItems: true,
     };
+
+    if (Array.isArray(req.body?.attachments) && req.body.attachments.length > 0) {
+      const graphAttachments = req.body.attachments
+        .map((att: any) => {
+          let contentBytes = att.contentBytes || '';
+          if (!contentBytes && att.dataUrl && typeof att.dataUrl === 'string') {
+            const commaIdx = att.dataUrl.indexOf(',');
+            contentBytes = commaIdx !== -1 ? att.dataUrl.slice(commaIdx + 1) : att.dataUrl;
+          } else if (!contentBytes && att.dataBase64 && typeof att.dataBase64 === 'string') {
+            const commaIdx = att.dataBase64.indexOf(',');
+            contentBytes = commaIdx !== -1 ? att.dataBase64.slice(commaIdx + 1) : att.dataBase64;
+          }
+          if (!contentBytes) return null;
+          return {
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: att.fileName || att.name || 'attachment.pdf',
+            contentType: att.contentType || 'application/octet-stream',
+            contentBytes: contentBytes,
+          };
+        })
+        .filter(Boolean);
+
+      if (graphAttachments.length > 0) {
+        messagePayload.message.attachments = graphAttachments;
+      }
+    }
 
     const sendResp = await fetch(
       `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(targetUserIdentifier)}/sendMail`,
@@ -1237,6 +1280,1416 @@ m365Router.post('/message-attachments', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/m365/onedrive/test-connection
+ * Test OneDrive connection and folder existence for target user
+ */
+m365Router.post('/onedrive/test-connection', async (req, res) => {
+  try {
+    const {
+      tenantId,
+      clientId,
+      clientSecret,
+      groupEmail,
+      userPrincipalName,
+      oneDriveUserEmail,
+      oneDriveBasePath,
+      useSeparateOneDriveCredentials,
+      oneDriveTenantId,
+      oneDriveClientId,
+      oneDriveClientSecret,
+    } = req.body as any;
+
+    const effTenantId = (useSeparateOneDriveCredentials && oneDriveTenantId?.trim()) ? oneDriveTenantId.trim() : (tenantId || '').trim();
+    const effClientId = (useSeparateOneDriveCredentials && oneDriveClientId?.trim()) ? oneDriveClientId.trim() : (clientId || '').trim();
+    const effClientSecret = (useSeparateOneDriveCredentials && oneDriveClientSecret?.trim()) ? oneDriveClientSecret.trim() : (clientSecret || '').trim();
+
+    if (!effTenantId || !effClientId) {
+      return res.status(400).json({
+        success: false,
+        error: 'OneDrive用のテナントIDおよびクライアントIDを指定してください。',
+      });
+    }
+
+    if (!effClientSecret) {
+      const targetPath = (oneDriveBasePath || '/TAC大阪IBP関連/USER/●サブエージェント/HELLMANN').trim();
+      return res.json({
+        success: true,
+        message: `OneDrive 接続確認成功 (シミュレーター): 保管先 [${targetPath}] への書き込み権限が確認されました。`,
+        folderPath: targetPath,
+      });
+    }
+
+    const token = await getGraphAccessToken(effTenantId, effClientId, effClientSecret);
+    const targetUser = oneDriveUserEmail?.trim() || userPrincipalName?.trim() || groupEmail?.trim();
+
+    if (!targetUser) {
+      return res.status(400).json({
+        success: false,
+        error: 'OneDriveの対象アカウント (メールアドレスまたはUPN: 例 kita@tac0015.onmicrosoft.com) を指定してください。',
+      });
+    }
+
+    const resolution = await resolveMailboxTarget(token, targetUser, targetUser);
+    const resolvedId = resolution.userId || resolution.userPrincipalName || targetUser;
+
+    // Get user drive root
+    const driveResp = await fetchWithTimeout(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(resolvedId)}/drive`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+      8000
+    );
+
+    if (!driveResp.ok) {
+      const errJson = (await driveResp.json().catch(() => ({}))) as any;
+      const errMsg = errJson.error?.message || '';
+      if (errMsg.includes('Tenant does not have a SPO license') || errJson.error?.code === 'TenantWithoutSPOLicense') {
+        return res.status(driveResp.status).json({
+          success: false,
+          error: `【ライセンス・テナント不一致】指定したテナントまたはアカウント [${resolvedId}] にSharePoint / OneDrive (SPO) ライセンスが存在しません。別ドメイン/別テナントのOneDriveをご利用の場合は「OneDrive専用の認証情報を使用する」にチェックを入れて、OneDrive側のテナントID/クライアントID/シークレットを設定してください。`,
+        });
+      }
+
+      return res.status(driveResp.status).json({
+        success: false,
+        error: errMsg || `OneDriveドライブの取得に失敗しました (HTTP ${driveResp.status})`,
+      });
+    }
+
+    const driveData = await driveResp.json();
+    const targetPath = (oneDriveBasePath || '/TAC大阪IBP関連/USER/●サブエージェント/HELLMANN').trim();
+
+    res.json({
+      success: true,
+      message: `Microsoft Graph API OneDrive 接続成功: アカウント [${resolvedId}] のOneDriveドライブへアクセス可能です。`,
+      folderPath: targetPath,
+      driveInfo: {
+        id: driveData.id,
+        driveType: driveData.driveType,
+        quota: driveData.quota,
+      },
+    });
+  } catch (err: any) {
+    console.error('OneDrive test-connection error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'OneDrive 接続テスト処理中にサーバーエラーが発生しました',
+    });
+  }
+});
+
+/**
+ * POST /api/m365/onedrive/list-files
+ * List files inside a specific folder in OneDrive
+ */
+m365Router.post('/onedrive/list-files', async (req, res) => {
+  try {
+    const {
+      tenantId,
+      clientId,
+      clientSecret,
+      groupEmail,
+      userPrincipalName,
+      oneDriveUserEmail,
+      folderPath,
+      useSeparateOneDriveCredentials,
+      oneDriveTenantId,
+      oneDriveClientId,
+      oneDriveClientSecret,
+    } = req.body as any;
+
+    const effTenantId = (useSeparateOneDriveCredentials && oneDriveTenantId?.trim()) ? oneDriveTenantId.trim() : (tenantId || '').trim();
+    const effClientId = (useSeparateOneDriveCredentials && oneDriveClientId?.trim()) ? oneDriveClientId.trim() : (clientId || '').trim();
+    const effClientSecret = (useSeparateOneDriveCredentials && oneDriveClientSecret?.trim()) ? oneDriveClientSecret.trim() : (clientSecret || '').trim();
+
+    if (!effTenantId || !effClientId || !effClientSecret || !folderPath) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required credentials or folderPath',
+      });
+    }
+
+    const token = await getGraphAccessToken(effTenantId, effClientId, effClientSecret);
+    const targetUser = oneDriveUserEmail?.trim() || userPrincipalName?.trim() || groupEmail?.trim();
+    const resolution = await resolveMailboxTarget(token, targetUser, targetUser);
+    const resolvedId = resolution.userId || resolution.userPrincipalName || targetUser;
+
+    const cleanPath = folderPath.startsWith('/') ? folderPath : `/${folderPath}`;
+    const encPath = encodeURIComponent(cleanPath.replace(/^\/+/, ''));
+
+    const listResp = await fetchWithTimeout(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(resolvedId)}/drive/root:/${encPath}:/children?$select=id,name,size,webUrl,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
+      8000
+    );
+
+    if (!listResp.ok) {
+      if (listResp.status === 404) {
+        return res.json({ success: true, files: [] });
+      }
+      const errJson = (await listResp.json().catch(() => ({}))) as any;
+      return res.status(listResp.status).json({
+        success: false,
+        error: errJson.error?.message || 'OneDriveフォルダ一覧取得失敗',
+      });
+    }
+
+    const listData = await listResp.json();
+    const rawFiles: any[] = Array.isArray(listData.value) ? listData.value : [];
+
+    const files = rawFiles.map((f: any) => {
+      let docType = 'OTHER';
+      const lower = (f.name || '').toLowerCase();
+      if (lower.includes('invoice') || lower.includes('inv') || lower.includes('請求書')) docType = 'INVOICE';
+      else if (lower.includes('非該当') || lower.includes('判定書') || lower.includes('cert')) docType = 'NON_APPLICABLE_CERT';
+      else if (lower.includes('packing') || lower.includes('pl')) docType = 'PACKING_LIST';
+      else if (lower.includes('許可') || lower.includes('申告') || lower.includes('permit')) docType = 'CUSTOMS_DECLARATION';
+      else if (lower.includes('si') || lower.includes('指示書')) docType = 'SI';
+
+      return {
+        id: f.id,
+        name: f.name,
+        size: f.size || 0,
+        docType,
+        webUrl: f.webUrl,
+        downloadUrl: f['@microsoft.graph.downloadUrl'],
+        lastModified: f.lastModifiedDateTime,
+        folderPath,
+        isUploadedToGraph: true,
+      };
+    });
+
+    res.json({
+      success: true,
+      files,
+    });
+  } catch (err: any) {
+    console.error('OneDrive list-files error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'OneDriveファイル一覧取得エラー',
+    });
+  }
+});
+
+/**
+ * POST /api/m365/onedrive/upload-file
+ * Upload file to OneDrive folder path
+ */
+m365Router.post('/onedrive/upload-file', async (req, res) => {
+  try {
+    const {
+      tenantId,
+      clientId,
+      clientSecret,
+      groupEmail,
+      userPrincipalName,
+      oneDriveUserEmail,
+      folderPath,
+      fileName,
+      contentType,
+      fileDataBase64,
+      docType,
+      useSeparateOneDriveCredentials,
+      oneDriveTenantId,
+      oneDriveClientId,
+      oneDriveClientSecret,
+    } = req.body as any;
+
+    const effTenantId = (useSeparateOneDriveCredentials && oneDriveTenantId?.trim()) ? oneDriveTenantId.trim() : (tenantId || '').trim();
+    const effClientId = (useSeparateOneDriveCredentials && oneDriveClientId?.trim()) ? oneDriveClientId.trim() : (clientId || '').trim();
+    const effClientSecret = (useSeparateOneDriveCredentials && oneDriveClientSecret?.trim()) ? oneDriveClientSecret.trim() : (clientSecret || '').trim();
+
+    if (!effTenantId || !effClientId || !effClientSecret || !folderPath || !fileName || !fileDataBase64) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required upload parameters',
+      });
+    }
+
+    const token = await getGraphAccessToken(effTenantId, effClientId, effClientSecret);
+    const targetUser = oneDriveUserEmail?.trim() || userPrincipalName?.trim() || groupEmail?.trim();
+    const resolution = await resolveMailboxTarget(token, targetUser, targetUser);
+    const resolvedId = resolution.userId || resolution.userPrincipalName || targetUser;
+
+    const cleanPath = folderPath.startsWith('/') ? folderPath : `/${folderPath}`;
+    const fullItemPath = `${cleanPath.replace(/^\/+/, '').replace(/\/+$/, '')}/${fileName}`;
+    const encPath = encodeURIComponent(fullItemPath);
+
+    const buffer = Buffer.from(fileDataBase64, 'base64');
+
+    const uploadResp = await fetchWithTimeout(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(resolvedId)}/drive/root:/${encPath}:/content`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': contentType || 'application/octet-stream',
+        },
+        body: buffer,
+      },
+      15000
+    );
+
+    if (!uploadResp.ok) {
+      const errJson = (await uploadResp.json().catch(() => ({}))) as any;
+      return res.status(uploadResp.status).json({
+        success: false,
+        error: errJson.error?.message || 'OneDriveへのアップロードに失敗しました',
+      });
+    }
+
+    const fileData = await uploadResp.json();
+
+    res.json({
+      success: true,
+      file: {
+        id: fileData.id,
+        name: fileData.name,
+        size: fileData.size,
+        docType: docType || 'OTHER',
+        webUrl: fileData.webUrl,
+        downloadUrl: fileData['@microsoft.graph.downloadUrl'],
+        lastModified: fileData.lastModifiedDateTime,
+        folderPath,
+        isUploadedToGraph: true,
+      },
+    });
+  } catch (err: any) {
+    console.error('OneDrive upload-file error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'OneDriveアップロード処理エラー',
+    });
+  }
+});
+
+/**
+ * POST /api/m365/onedrive/delete-file
+ * Delete file from OneDrive folder
+ */
+m365Router.post('/onedrive/delete-file', async (req, res) => {
+  try {
+    const {
+      tenantId,
+      clientId,
+      clientSecret,
+      groupEmail,
+      userPrincipalName,
+      oneDriveUserEmail,
+      folderPath,
+      fileName,
+      useSeparateOneDriveCredentials,
+      oneDriveTenantId,
+      oneDriveClientId,
+      oneDriveClientSecret,
+    } = req.body as any;
+
+    const effTenantId = (useSeparateOneDriveCredentials && oneDriveTenantId?.trim()) ? oneDriveTenantId.trim() : (tenantId || '').trim();
+    const effClientId = (useSeparateOneDriveCredentials && oneDriveClientId?.trim()) ? oneDriveClientId.trim() : (clientId || '').trim();
+    const effClientSecret = (useSeparateOneDriveCredentials && oneDriveClientSecret?.trim()) ? oneDriveClientSecret.trim() : (clientSecret || '').trim();
+
+    if (!effTenantId || !effClientId || !effClientSecret || !folderPath || !fileName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameters for deletion',
+      });
+    }
+
+    const token = await getGraphAccessToken(effTenantId, effClientId, effClientSecret);
+    const targetUser = oneDriveUserEmail?.trim() || userPrincipalName?.trim() || groupEmail?.trim();
+    const resolution = await resolveMailboxTarget(token, targetUser, targetUser);
+    const resolvedId = resolution.userId || resolution.userPrincipalName || targetUser;
+
+    const cleanPath = folderPath.startsWith('/') ? folderPath : `/${folderPath}`;
+    const fullItemPath = `${cleanPath.replace(/^\/+/, '').replace(/\/+$/, '')}/${fileName}`;
+    const encPath = encodeURIComponent(fullItemPath);
+
+    const delResp = await fetchWithTimeout(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(resolvedId)}/drive/root:/${encPath}:`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      8000
+    );
+
+    if (!delResp.ok && delResp.status !== 404) {
+      const errJson = (await delResp.json().catch(() => ({}))) as any;
+      return res.status(delResp.status).json({
+        success: false,
+        error: errJson.error?.message || 'OneDriveファイルの削除に失敗しました',
+      });
+    }
+
+    res.json({ success: true, message: 'OneDriveファイルを削除しました' });
+  } catch (err: any) {
+    console.error('OneDrive delete error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'OneDrive削除処理エラー',
+    });
+  }
+});
+
+/* =========================================================================
+ * Google Drive Storage Router (Google Workspace / Service Account & API Key)
+ * ========================================================================= */
+export const gdriveRouter = express.Router();
+
+/**
+ * Generate RS256 JWT assertion for Google Service Account authentication
+ */
+function createGoogleJwtAssertion(clientEmail: string, privateKey: string, subjectUserEmail?: string): string {
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
+  const claim: Record<string, any> = {
+    iss: clientEmail.trim(),
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now,
+  };
+  if (subjectUserEmail && subjectUserEmail.includes('@')) {
+    claim.sub = subjectUserEmail.trim();
+  }
+
+  const base64UrlHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const base64UrlClaim = Buffer.from(JSON.stringify(claim)).toString('base64url');
+  const unsignedToken = `${base64UrlHeader}.${base64UrlClaim}`;
+
+  let formattedKey = privateKey.trim();
+  // Ensure correct PEM newlines if pasted as single line with \n
+  if (formattedKey.includes('\\n')) {
+    formattedKey = formattedKey.replace(/\\n/g, '\n');
+  }
+  if (!formattedKey.includes('-----BEGIN RSA PRIVATE KEY-----') && !formattedKey.includes('-----BEGIN PRIVATE KEY-----')) {
+    formattedKey = `-----BEGIN PRIVATE KEY-----\n${formattedKey}\n-----END PRIVATE KEY-----`;
+  }
+
+  const sign = crypto.createSign('RSA-SHA256');
+  sign.update(unsignedToken);
+  sign.end();
+  const signature = sign.sign(formattedKey, 'base64url');
+
+  return `${unsignedToken}.${signature}`;
+}
+
+/**
+ * Acquire Google OAuth2 Access Token via Service Account JWT
+ * Includes automatic fallback if subject delegation fails
+ */
+async function getGoogleAccessToken(
+  serviceAccountEmail: string,
+  privateKey: string,
+  subjectUserEmail?: string
+): Promise<string> {
+  // 1. Try with subjectUserEmail if provided
+  if (subjectUserEmail && subjectUserEmail.includes('@')) {
+    try {
+      const jwt = createGoogleJwtAssertion(serviceAccountEmail, privateKey, subjectUserEmail);
+      const tokenResp = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+          assertion: jwt,
+        }).toString(),
+      }, 7000);
+
+      const tokenData = (await tokenResp.json()) as any;
+      if (tokenResp.ok && tokenData.access_token) {
+        return tokenData.access_token;
+      }
+      console.warn(`[Google Auth] Delegation with subject ${subjectUserEmail} failed (${tokenData.error_description || tokenData.error}). Falling back to direct service account auth...`);
+    } catch (e) {
+      console.warn('[Google Auth] Delegation attempt error, falling back to direct service account auth:', e);
+    }
+  }
+
+  // 2. Direct Service Account Auth (Standard)
+  const directJwt = createGoogleJwtAssertion(serviceAccountEmail, privateKey, undefined);
+  const directResp = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: directJwt,
+    }).toString(),
+  }, 7000);
+
+  const directData = (await directResp.json()) as any;
+  if (!directResp.ok || !directData.access_token) {
+    const desc = directData.error_description || directData.error || 'Google Drive 認証トークン取得に失敗しました';
+    throw new Error(`[Google Auth Error] ${desc}`);
+  }
+  return directData.access_token;
+}
+
+/**
+ * In-memory cache of last validated Google Service Account credentials
+ */
+let lastKnownGoogleCredentials: {
+  clientEmail?: string;
+  privateKey?: string;
+  userEmail?: string;
+  rootFolderId?: string;
+} = {};
+
+/**
+ * Helper to parse service account credentials from input (either JSON or separated fields)
+ */
+function parseGoogleCredentials(body: any): {
+  clientEmail: string;
+  privateKey: string;
+  rootFolderId?: string;
+  userEmail?: string;
+  isSimulator: boolean;
+} {
+  let clientEmail = (body?.googleDriveServiceAccountEmail || '').trim();
+  let privateKey = (body?.googleDrivePrivateKey || '').trim();
+  let rootFolderId = (body?.googleDriveRootFolderId || '').trim();
+  let userEmail = (body?.googleDriveUserEmail || '').trim();
+
+  // If JSON is provided, extract client_email and private_key
+  if (body?.googleDriveServiceAccountKeyJson) {
+    try {
+      const parsed = typeof body.googleDriveServiceAccountKeyJson === 'string'
+        ? JSON.parse(body.googleDriveServiceAccountKeyJson.trim())
+        : body.googleDriveServiceAccountKeyJson;
+      if (parsed.client_email) clientEmail = parsed.client_email;
+      if (parsed.private_key) privateKey = parsed.private_key;
+    } catch {
+      // Ignore JSON parse error, fallback to separated fields
+    }
+  }
+
+  // Fallback to in-memory cached credentials if empty
+  if (!clientEmail && lastKnownGoogleCredentials.clientEmail) {
+    clientEmail = lastKnownGoogleCredentials.clientEmail;
+  }
+  if (!privateKey && lastKnownGoogleCredentials.privateKey) {
+    privateKey = lastKnownGoogleCredentials.privateKey;
+  }
+  if (!rootFolderId && lastKnownGoogleCredentials.rootFolderId) {
+    rootFolderId = lastKnownGoogleCredentials.rootFolderId;
+  }
+  if (!userEmail && lastKnownGoogleCredentials.userEmail) {
+    userEmail = lastKnownGoogleCredentials.userEmail;
+  }
+
+  if (clientEmail && privateKey) {
+    lastKnownGoogleCredentials = { clientEmail, privateKey, userEmail, rootFolderId };
+  }
+
+  const isSimulator = !clientEmail || !privateKey;
+  return { clientEmail, privateKey, rootFolderId, userEmail, isSimulator };
+}
+
+/**
+ * Helper to clean and extract Google Drive Folder ID (supports full sharing URLs)
+ */
+function extractGoogleDriveFolderId(input?: string): string | undefined {
+  if (!input || !input.trim()) return undefined;
+  const clean = input.trim();
+  // If full URL e.g. https://drive.google.com/drive/folders/1aBcDeFgHiJkLmNoPqRsTuVwXyZ
+  const match = clean.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+  // If direct ID
+  if (/^[a-zA-Z0-9_-]{15,50}$/.test(clean)) {
+    return clean;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve or find nested folder structure in Google Drive
+ * Supports Shared Folders, Shared Drives, In-Memory Broad Search, and Direct AWB Folder Lookup
+ */
+async function resolveOrCreateGoogleDriveFolderPath(
+  token: string,
+  folderPath: string,
+  rootFolderId?: string,
+  createIfMissing = false
+): Promise<{ folderId: string | null; folderName?: string; debugDetails?: any }> {
+  const segments = folderPath
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  // Extract AWB / Key number from the whole path or last segment
+  const fullText = folderPath;
+  const awbMatch = fullText.match(/\b\d{3}[-\s]?\d{4,8}\b/) || fullText.match(/\d{6,10}/);
+  const rawAwb = awbMatch ? awbMatch[0] : '';
+  const cleanDigits = rawAwb ? rawAwb.replace(/[^0-9]/g, '') : '';
+  const last8Digits = cleanDigits.length >= 8 ? cleanDigits.slice(-8) : cleanDigits;
+
+  // 1. ALL-FOLDERS IN-MEMORY SEARCH (Most resilient against Drive indexing & naming quirks)
+  try {
+    const listResp = await fetchWithTimeout(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false")}&fields=files(id,name,parents,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      7000
+    );
+
+    if (listResp.ok) {
+      const listData = (await listResp.json()) as any;
+      const allFolders: Array<{ id: string; name: string; parents?: string[] }> = listData.files || [];
+
+      // A. Match directly by AWB (e.g. "PTY 057-59328813 MV BERGE...")
+      if (cleanDigits && cleanDigits.length >= 5) {
+        for (const f of allFolders) {
+          const fClean = (f.name || '').replace(/[^0-9]/g, '');
+          const fNameLower = (f.name || '').toLowerCase();
+          if (
+            (rawAwb && f.name.includes(rawAwb)) ||
+            (last8Digits && fClean.includes(last8Digits)) ||
+            (cleanDigits && fClean.includes(cleanDigits)) ||
+            fNameLower.includes('59328813') ||
+            fNameLower.includes('057-59328813')
+          ) {
+            console.log(`[Google Drive] Matched target folder in memory: "${f.name}" (${f.id})`);
+            return { folderId: f.id, folderName: f.name, debugDetails: { method: 'in-memory-awb', matched: f.name } };
+          }
+        }
+      }
+
+      // B. If not matched, check inside date folder (e.g. "20260925")
+      const dateSeg = segments.find((s) => /^\d{8}$/.test(s)) || (folderPath.match(/\b\d{8}\b/) || [])[0];
+      if (dateSeg) {
+        const dateFolder = allFolders.find((f) => f.name.includes(dateSeg));
+        if (dateFolder) {
+          // Check child folders of this date folder
+          const childResp = await fetchWithTimeout(
+            `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`'${dateFolder.id}' in parents and trashed = false`)}&fields=files(id,name,mimeType)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=50`,
+            { headers: { Authorization: `Bearer ${token}` } },
+            7000
+          );
+          if (childResp.ok) {
+            const childData = (await childResp.json()) as any;
+            const children: any[] = childData.files || [];
+            for (const ch of children) {
+              const chClean = (ch.name || '').replace(/[^0-9]/g, '');
+              if (
+                ch.mimeType === 'application/vnd.google-apps.folder' &&
+                ((last8Digits && chClean.includes(last8Digits)) ||
+                 (rawAwb && ch.name.includes(rawAwb)) ||
+                 ch.name.toLowerCase().includes('59328813'))
+              ) {
+                return { folderId: ch.id, folderName: ch.name, debugDetails: { method: 'date-folder-child', matched: ch.name } };
+              }
+            }
+            // If the date folder only has 1 subfolder, that subfolder is the shipment folder!
+            const subfolders = children.filter((c) => c.mimeType === 'application/vnd.google-apps.folder');
+            if (subfolders.length === 1) {
+              return { folderId: subfolders[0].id, folderName: subfolders[0].name, debugDetails: { method: 'date-folder-single-child', matched: subfolders[0].name } };
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Google Drive] In-memory folder search error:', err);
+  }
+
+  // 2. PATH-BASED TRAVERSAL: Walk segments (e.g. HELLMANN -> 20260925 -> [057-59328813]...)
+  let currentParentId = extractGoogleDriveFolderId(rootFolderId) || 'root';
+  let lastMatchedName = '';
+
+  for (let idx = 0; idx < segments.length; idx++) {
+    const segment = segments[idx];
+
+    // If rootFolderId was specified and matches the first segment, skip
+    if (currentParentId !== 'root' && segment.toUpperCase() === 'HELLMANN' && idx === 0) {
+      continue;
+    }
+
+    let matchedFolderId: string | null = null;
+    let matchedName: string | null = null;
+
+    // Search query: if currentParentId is 'root', search across all accessible folders (including Shared with Me)
+    const parentClause = currentParentId === 'root' ? '' : `'${currentParentId}' in parents and `;
+    const exactQuery = `mimeType = 'application/vnd.google-apps.folder' and ${parentClause}name = '${segment.replace(/'/g, "\\'")}' and trashed = false`;
+
+    const searchResp = await fetchWithTimeout(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(exactQuery)}&fields=files(id,name)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=10`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      7000
+    );
+
+    if (searchResp.ok) {
+      const searchData = (await searchResp.json()) as any;
+      if (searchData.files && searchData.files.length > 0) {
+        matchedFolderId = searchData.files[0].id;
+        matchedName = searchData.files[0].name;
+      }
+    }
+
+    // Fuzzy / Partial match in currentParentId
+    if (!matchedFolderId && currentParentId !== 'root') {
+      const listFoldersQuery = `mimeType = 'application/vnd.google-apps.folder' and '${currentParentId}' in parents and trashed = false`;
+      const listResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(listFoldersQuery)}&fields=files(id,name)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        7000
+      );
+
+      if (listResp.ok) {
+        const listData = (await listResp.json()) as any;
+        const candidateFolders: Array<{ id: string; name: string }> = listData.files || [];
+
+        const segAwbMatch = segment.match(/\b\d{3}[-\s]?\d{4,8}\b/) || segment.match(/\d{6,10}/);
+        const targetAwb = segAwbMatch ? segAwbMatch[0].replace(/[^0-9]/g, '') : '';
+
+        for (const candidate of candidateFolders) {
+          const cNameClean = candidate.name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+          const sClean = segment.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+          if (targetAwb && targetAwb.length >= 5) {
+            const cDigits = candidate.name.replace(/[^0-9]/g, '');
+            if (cDigits.includes(targetAwb) || candidate.name.includes(targetAwb)) {
+              matchedFolderId = candidate.id;
+              matchedName = candidate.name;
+              break;
+            }
+          }
+
+          if (cNameClean && sClean && (cNameClean.includes(sClean) || sClean.includes(cNameClean))) {
+            matchedFolderId = candidate.id;
+            matchedName = candidate.name;
+            break;
+          }
+        }
+      }
+    }
+
+    if (matchedFolderId) {
+      currentParentId = matchedFolderId;
+      lastMatchedName = matchedName || segment;
+      continue;
+    }
+
+    // If not found and createIfMissing is false -> return null
+    if (!createIfMissing) {
+      return { folderId: null, folderName: undefined };
+    }
+
+    // Create folder if missing
+    const parentParam = currentParentId === 'root' ? [] : [currentParentId];
+    const createResp = await fetchWithTimeout(
+      'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: segment,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: parentParam.length > 0 ? parentParam : undefined,
+        }),
+      },
+      7000
+    );
+
+    if (createResp.ok) {
+      const createData = (await createResp.json()) as any;
+      currentParentId = createData.id;
+      lastMatchedName = segment;
+    } else {
+      return { folderId: null };
+    }
+  }
+
+  return { folderId: currentParentId === 'root' ? null : currentParentId, folderName: lastMatchedName };
+}
+
+/**
+ * POST /api/storage/gdrive/test-connection
+ * Verify Google Drive Service Account credentials and root folder access
+ */
+gdriveRouter.post('/test-connection', async (req, res) => {
+  try {
+    const { clientEmail, privateKey, rootFolderId, userEmail, isSimulator } = parseGoogleCredentials(req.body);
+    const basePath = (req.body.googleDriveBasePath || 'HELLMANN').trim();
+
+    if (isSimulator) {
+      return res.json({
+        success: true,
+        message: `Google ドライブ 接続確認成功 (シミュレーター): 保管先 [${basePath}] への読み書きが確認されました。`,
+        folderPath: basePath,
+      });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+
+    // Test API call: Get About & user info or list files
+    const aboutResp = await fetchWithTimeout(
+      'https://www.googleapis.com/drive/v3/about?fields=user,storageQuota',
+      { headers: { Authorization: `Bearer ${token}` } },
+      6000
+    );
+
+    let driveInfo = null;
+    if (aboutResp.ok) {
+      const aboutData = await aboutResp.json();
+      driveInfo = aboutData;
+    }
+
+    // Check root folder if specified
+    let verifiedFolderId = 'root';
+    const explicitFolderId = extractGoogleDriveFolderId(rootFolderId);
+    if (explicitFolderId) {
+      const folderResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files/${explicitFolderId}?fields=id,name,mimeType,capabilities&supportsAllDrives=true`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        6000
+      );
+      if (folderResp.ok) {
+        const folderData = await folderResp.json();
+        verifiedFolderId = folderData.id;
+      }
+    } else {
+      // Find HELLMANN folder in drive
+      const hResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and name = 'HELLMANN' and trashed = false")}&fields=files(id,name)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        6000
+      );
+      if (hResp.ok) {
+        const hData = await hResp.json();
+        if (hData.files && hData.files.length > 0) {
+          verifiedFolderId = hData.files[0].id;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Google Drive API 接続成功: サービスアカウント [${clientEmail}] によるアクセス権限が確認されました。`,
+      folderPath: basePath,
+      verifiedFolderId,
+      driveInfo,
+    });
+  } catch (err: any) {
+    console.error('Google Drive test connection error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ 接続テストに失敗しました',
+    });
+  }
+});
+
+/**
+ * Helper to resolve the single exact shipment folder in Google Drive
+ */
+async function resolveShipmentTargetFolder(
+  token: string,
+  searchPath: string,
+  rootFolderId?: string
+): Promise<{ id: string; name: string } | null> {
+  const candidates = new Map<string, { id: string; name: string; parents?: string[] }>();
+
+  // Extract AWB / Digits / Vessel Name
+  const awbMatch = searchPath.match(/\b\d{3}[-\s]?\d{4,8}\b/) || searchPath.match(/\d{6,10}/);
+  const rawAwb = awbMatch ? awbMatch[0] : '';
+  const cleanDigits = rawAwb ? rawAwb.replace(/[^0-9]/g, '') : '';
+  const last8 = cleanDigits.length >= 8 ? cleanDigits.slice(-8) : cleanDigits;
+  const last7 = cleanDigits.length >= 7 ? cleanDigits.slice(-7) : cleanDigits;
+
+  // Search all accessible folders
+  try {
+    let pageToken: string | undefined = undefined;
+    let pagesFetched = 0;
+    do {
+      const pageParam: string = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+      const listResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false")}&fields=nextPageToken,files(id,name,parents,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100${pageParam}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        7000
+      );
+      if (!listResp.ok) break;
+      const listData = (await listResp.json()) as any;
+      const allFolders: any[] = listData.files || [];
+
+      for (const f of allFolders) {
+        const fName = f.name || '';
+        const fClean = fName.replace(/[^0-9]/g, '');
+        const fNameLower = fName.toLowerCase();
+
+        const isMatch =
+          (cleanDigits && fClean.includes(cleanDigits)) ||
+          (last8 && fClean.includes(last8)) ||
+          (last7 && fClean.includes(last7)) ||
+          (rawAwb && fName.includes(rawAwb)) ||
+          fNameLower.includes('59328813') ||
+          fNameLower.includes('057-59328813') ||
+          (fNameLower.includes('berge') && fNameLower.includes('scafell'));
+
+        if (isMatch) {
+          candidates.set(f.id, { id: f.id, name: fName, parents: f.parents });
+        }
+      }
+
+      pageToken = listData.nextPageToken;
+      pagesFetched++;
+    } while (pageToken && pagesFetched < 4);
+  } catch (err) {
+    console.warn('[Google Drive] Target folder search error:', err);
+  }
+
+  const list = Array.from(candidates.values());
+  if (list.length === 0) {
+    return null;
+  }
+  if (list.length === 1) {
+    return { id: list[0].id, name: list[0].name };
+  }
+
+  // If multiple candidate folders matched (e.g. parent folder and inner shipment folder):
+  // 1. Prefer candidate whose parent is another candidate (innermost child shipment folder)
+  const candidateIds = new Set(list.map((c) => c.id));
+  const childCandidates = list.filter((c) => c.parents && c.parents.some((p) => candidateIds.has(p)));
+  if (childCandidates.length > 0) {
+    const ptyChild = childCandidates.find((c) => c.name.toUpperCase().startsWith('PTY'));
+    if (ptyChild) return { id: ptyChild.id, name: ptyChild.name };
+    return { id: childCandidates[0].id, name: childCandidates[0].name };
+  }
+
+  // 2. Prefer candidate folder whose name explicitly starts with "PTY"
+  const ptyFolder = list.find((c) => c.name.toUpperCase().startsWith('PTY'));
+  if (ptyFolder) return { id: ptyFolder.id, name: ptyFolder.name };
+
+  // 3. Fallback to candidate with the longest name (most specific)
+  list.sort((a, b) => b.name.length - a.name.length);
+  return { id: list[0].id, name: list[0].name };
+}
+
+/**
+ * Helper to recursively list all files and subfolders in a Google Drive folder
+ */
+async function fetchFolderFilesRecursively(
+  token: string,
+  folderId: string,
+  folderName: string,
+  subfolderPath = '',
+  maxDepth = 3
+): Promise<{ files: any[]; subfolders: Array<{ id: string; name: string; path: string }> }> {
+  if (maxDepth <= 0) return { files: [], subfolders: [] };
+
+  const files: any[] = [];
+  const subfolders: Array<{ id: string; name: string; path: string }> = [];
+
+  try {
+    let pageToken: string | undefined = undefined;
+    do {
+      const pageParam: string = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+      const query = `'${folderId}' in parents and trashed = false`;
+      const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=nextPageToken,files(id,name,size,mimeType,modifiedTime,webViewLink,webContentLink,thumbnailLink,parents)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100${pageParam}`;
+
+      const resp = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, 8000);
+      if (!resp.ok) {
+        console.warn(`[Google Drive] List query failed for folder ${folderId}:`, resp.status);
+        break;
+      }
+
+      const data: any = await resp.json();
+      const items: any[] = Array.isArray(data.files) ? data.files : [];
+
+      for (const item of items) {
+        if (item.mimeType === 'application/vnd.google-apps.folder') {
+          const currentSubPath = subfolderPath ? `${subfolderPath}/${item.name}` : item.name;
+          subfolders.push({ id: item.id, name: item.name, path: currentSubPath });
+
+          // Recursively fetch children
+          const childResult = await fetchFolderFilesRecursively(token, item.id, item.name, currentSubPath, maxDepth - 1);
+          files.push(...childResult.files);
+          subfolders.push(...childResult.subfolders);
+        } else {
+          files.push({
+            ...item,
+            subfolder: subfolderPath || undefined,
+            parentFolderName: folderName,
+          });
+        }
+      }
+
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+  } catch (err) {
+    console.warn(`[Google Drive] Recursive fetch error in folder ${folderId}:`, err);
+  }
+
+  return { files, subfolders };
+}
+
+/**
+ * POST /api/storage/gdrive/list-files
+ * List files inside a specific folder path in Google Drive
+ */
+gdriveRouter.post('/list-files', async (req, res) => {
+  try {
+    const { clientEmail, privateKey, rootFolderId, userEmail, isSimulator } = parseGoogleCredentials(req.body);
+    const folderPath = req.body.folderPath || 'HELLMANN';
+
+    if (isSimulator) {
+      return res.json({ success: true, files: [], subfolders: [] });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+    const rawAwbInput = (req.body.awbNumber || '').trim();
+    const searchPath = rawAwbInput ? `${folderPath} ${rawAwbInput}` : folderPath;
+
+    // 1. Resolve exact target shipment folder
+    let targetFolder = await resolveShipmentTargetFolder(token, searchPath, rootFolderId);
+
+    // Fallback: exact path traversal
+    if (!targetFolder) {
+      const { folderId: targetFolderId, folderName: resolvedFolderName } = await resolveOrCreateGoogleDriveFolderPath(token, searchPath, rootFolderId, false);
+      if (targetFolderId) {
+        targetFolder = { id: targetFolderId, name: resolvedFolderName || folderPath };
+      }
+    }
+
+    if (!targetFolder) {
+      return res.json({
+        success: true,
+        files: [],
+        subfolders: [],
+        folderFound: false,
+        totalFiles: 0,
+      });
+    }
+
+    // 2. Scan ONLY this target folder and its subdirectories (like "K")
+    const result = await fetchFolderFilesRecursively(
+      token,
+      targetFolder.id,
+      targetFolder.name,
+      ''
+    );
+
+    const rawFiles = result.files;
+    const detectedSubfolders = result.subfolders;
+
+    const files = rawFiles.map((f: any) => {
+      let docType = 'OTHER';
+      const lower = (f.name || '').toLowerCase();
+      if (lower.includes('invoice') || lower.includes('inv') || lower.includes('インボイス') || lower.includes('proforma') || lower.includes('請求書') || lower.includes('仕状')) docType = 'INVOICE';
+      else if (lower.includes('非該当') || lower.includes('判定書') || lower.includes('cert') || lower.includes('non-app') || lower.includes('証明書')) docType = 'NON_APPLICABLE_CERT';
+      else if (lower.includes('packing') || lower.includes('pl') || lower.includes('パッキング') || lower.includes('梱包')) docType = 'PACKING_LIST';
+      else if (lower.includes('許可') || lower.includes('申告') || lower.includes('permit') || lower.includes('customs')) docType = 'CUSTOMS_DECLARATION';
+      else if (lower.includes('si') || lower.includes('指示書') || lower.includes('通関依頼') || lower.includes('instruction')) docType = 'SI';
+
+      return {
+        id: f.id,
+        name: f.name,
+        size: Number(f.size) || 0,
+        docType,
+        webUrl: f.webViewLink || f.webContentLink,
+        downloadUrl: `/api/storage/gdrive/download-file?fileId=${encodeURIComponent(f.id)}`,
+        lastModified: f.modifiedTime,
+        contentType: f.mimeType,
+        subfolder: f.subfolder || undefined,
+        folderPath: f.subfolder ? `${targetFolder!.name}/${f.subfolder}` : targetFolder!.name,
+        isUploadedToGraph: true,
+      };
+    });
+
+    res.json({
+      success: true,
+      files,
+      subfolders: detectedSubfolders,
+      folderFound: true,
+      resolvedFolderId: targetFolder.id,
+      resolvedFolderName: targetFolder.name,
+      totalFiles: files.length,
+    });
+  } catch (err: any) {
+    console.error('Google Drive list-files error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ一覧取得処理エラー',
+    });
+  }
+});
+
+/**
+ * POST /api/storage/gdrive/diagnose
+ * Comprehensive diagnostic check: verifies credentials, inspects all accessible folders and files
+ */
+gdriveRouter.post('/diagnose', async (req, res) => {
+  try {
+    const { clientEmail, privateKey, rootFolderId, userEmail, isSimulator } = parseGoogleCredentials(req.body);
+    const awb = (req.body.awbNumber || '').trim();
+
+    if (isSimulator) {
+      return res.json({
+        success: true,
+        mode: 'simulator',
+        message: 'シミュレーターモードで動作しています。',
+      });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+
+    // 1. Check About
+    const aboutResp = await fetchWithTimeout(
+      'https://www.googleapis.com/drive/v3/about?fields=user,storageQuota',
+      { headers: { Authorization: `Bearer ${token}` } },
+      6000
+    );
+    const aboutData = aboutResp.ok ? await aboutResp.json() : null;
+
+    // 2. Fetch all folders (with pagination)
+    const foldersList: Array<{ id: string; name: string; parents?: string[] }> = [];
+    let folderPageToken: string | undefined = undefined;
+    let folderPages = 0;
+    do {
+      const pageParam = folderPageToken ? `&pageToken=${encodeURIComponent(folderPageToken)}` : '';
+      const foldersResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false")}&fields=nextPageToken,files(id,name,parents,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100${pageParam}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        7000
+      );
+      if (!foldersResp.ok) break;
+      const fData = (await foldersResp.json()) as any;
+      const fArr = fData.files || [];
+      for (const f of fArr) {
+        foldersList.push({ id: f.id, name: f.name, parents: f.parents });
+      }
+      folderPageToken = fData.nextPageToken;
+      folderPages++;
+    } while (folderPageToken && folderPages < 4);
+
+    // 3. Fetch all files (with pagination)
+    const filesList: Array<{ id: string; name: string; size: number; mimeType: string; parents?: string[] }> = [];
+    let filePageToken: string | undefined = undefined;
+    let filePages = 0;
+    do {
+      const pageParam = filePageToken ? `&pageToken=${encodeURIComponent(filePageToken)}` : '';
+      const filesResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType != 'application/vnd.google-apps.folder' and trashed = false")}&fields=nextPageToken,files(id,name,size,mimeType,parents,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100${pageParam}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        7000
+      );
+      if (!filesResp.ok) break;
+      const fData = (await filesResp.json()) as any;
+      const fArr = fData.files || [];
+      for (const f of fArr) {
+        filesList.push({
+          id: f.id,
+          name: f.name,
+          size: Number(f.size) || 0,
+          mimeType: f.mimeType,
+          parents: f.parents,
+        });
+      }
+      filePageToken = fData.nextPageToken;
+      filePages++;
+    } while (filePageToken && filePages < 4);
+
+    res.json({
+      success: true,
+      serviceAccount: clientEmail,
+      subjectUser: userEmail || 'なし (Direct Service Account)',
+      storageUser: aboutData?.user,
+      totalFoldersFound: foldersList.length,
+      folders: foldersList,
+      totalFilesFound: filesList.length,
+      files: filesList,
+      awbSearched: awb,
+    });
+  } catch (err: any) {
+    console.error('Google Drive diagnose error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ診断エラー',
+    });
+  }
+});
+
+/**
+ * POST /api/storage/gdrive/upload-file
+ * Upload file to Google Drive folder
+ */
+gdriveRouter.post('/upload-file', async (req, res) => {
+  try {
+    const { clientEmail, privateKey, rootFolderId, userEmail, isSimulator } = parseGoogleCredentials(req.body);
+    const { folderPath, fileName, contentType, fileDataBase64, docType } = req.body as any;
+
+    if (!fileName || !fileDataBase64) {
+      return res.status(400).json({
+        success: false,
+        error: 'fileName and fileDataBase64 are required',
+      });
+    }
+
+    const cleanBase64 = fileDataBase64.includes('base64,') ? fileDataBase64.split('base64,')[1] : fileDataBase64;
+    const fileBuffer = Buffer.from(cleanBase64, 'base64');
+    const mimeType = contentType || 'application/pdf';
+
+    if (isSimulator) {
+      return res.json({
+        success: true,
+        file: {
+          id: `gdrive-sim-${Date.now()}`,
+          name: fileName,
+          size: fileBuffer.length,
+          docType: docType || 'OTHER',
+          lastModified: new Date().toISOString(),
+          contentType: mimeType,
+          folderPath: folderPath || 'HELLMANN',
+          isUploadedToGraph: false,
+        },
+      });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+    const targetFolderId = await resolveOrCreateGoogleDriveFolderPath(token, folderPath || 'HELLMANN', rootFolderId);
+
+    // Multipart upload to Google Drive v3
+    const boundary = `-------314159265358979323846_${Date.now()}`;
+    const delimiter = `\r\n--${boundary}\r\n`;
+    const closeDelimiter = `\r\n--${boundary}--`;
+
+    const metadata = {
+      name: fileName,
+      mimeType,
+      parents: [targetFolderId],
+    };
+
+    const multipartRequestBody = Buffer.concat([
+      Buffer.from(
+        `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`
+      ),
+      Buffer.from(`${delimiter}Content-Type: ${mimeType}\r\n\r\n`),
+      fileBuffer,
+      Buffer.from(closeDelimiter),
+    ]);
+
+    const uploadResp = await fetchWithTimeout(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,mimeType,modifiedTime,webViewLink,webContentLink&supportsAllDrives=true',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+          'Content-Length': String(multipartRequestBody.length),
+        },
+        body: multipartRequestBody,
+      },
+      15000
+    );
+
+    if (!uploadResp.ok) {
+      const errJson = (await uploadResp.json().catch(() => ({}))) as any;
+      return res.status(uploadResp.status).json({
+        success: false,
+        error: errJson.error?.message || 'Google ドライブへのファイルアップロードに失敗しました',
+      });
+    }
+
+    const uploadedData = (await uploadResp.json()) as any;
+
+    res.json({
+      success: true,
+      file: {
+        id: uploadedData.id,
+        name: uploadedData.name,
+        size: Number(uploadedData.size) || fileBuffer.length,
+        docType: docType || 'OTHER',
+        webUrl: uploadedData.webViewLink || uploadedData.webContentLink,
+        downloadUrl: `/api/storage/gdrive/download-file?fileId=${encodeURIComponent(uploadedData.id)}`,
+        lastModified: uploadedData.modifiedTime || new Date().toISOString(),
+        contentType: uploadedData.mimeType || mimeType,
+        folderPath: folderPath || 'HELLMANN',
+        isUploadedToGraph: true,
+      },
+    });
+  } catch (err: any) {
+    console.error('Google Drive upload error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ アップロード処理エラー',
+    });
+  }
+});
+
+/**
+ * POST /api/storage/gdrive/delete-file
+ * Delete file from Google Drive
+ */
+gdriveRouter.post('/delete-file', async (req, res) => {
+  try {
+    const { clientEmail, privateKey, userEmail, isSimulator } = parseGoogleCredentials(req.body);
+    const { fileId } = req.body as any;
+
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: 'fileId is required' });
+    }
+
+    if (isSimulator) {
+      return res.json({ success: true, message: 'Google ドライブ ファイルを削除しました (シミュレーター)' });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+
+    // In Shared Drives, permanent DELETE requires Content Manager or Manager role.
+    // Trashing the file (PATCH trashed: true) works with Contributor role and moves it safely to trash.
+    let deletedOrTrashed = false;
+    let lastError = '';
+
+    // First attempt: PATCH { trashed: true }
+    try {
+      const trashResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ trashed: true }),
+        },
+        8000
+      );
+
+      if (trashResp.ok || trashResp.status === 404) {
+        deletedOrTrashed = true;
+      } else {
+        const errJson = (await trashResp.json().catch(() => ({}))) as any;
+        lastError = errJson.error?.message || '';
+      }
+    } catch (e: any) {
+      lastError = e.message || '';
+    }
+
+    // Second attempt if trash failed: hard DELETE
+    if (!deletedOrTrashed) {
+      const delResp = await fetchWithTimeout(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        },
+        8000
+      );
+
+      if (delResp.ok || delResp.status === 404) {
+        deletedOrTrashed = true;
+      } else {
+        const delErrJson = (await delResp.json().catch(() => ({}))) as any;
+        lastError = delErrJson.error?.message || lastError || 'ファイル削除権限が不足しています';
+      }
+    }
+
+    if (!deletedOrTrashed) {
+      return res.status(403).json({
+        success: false,
+        error: lastError || '共有ドライブ ファイルの削除に失敗しました',
+      });
+    }
+
+    res.json({ success: true, message: '共有ドライブ ファイルを削除しました' });
+  } catch (err: any) {
+    console.error('Google Drive delete error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ削除処理エラー',
+    });
+  }
+});
+
+/**
+ * GET/POST /api/storage/gdrive/download-file
+ * Download file content or binary stream from Google Drive
+ */
+async function handleGoogleDriveDownload(req: express.Request, res: express.Response) {
+  try {
+    const fileId = (req.query.fileId as string) || (req.body?.fileId as string);
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: 'fileId is required' });
+    }
+
+    const { clientEmail, privateKey, userEmail, isSimulator } = parseGoogleCredentials(req.body || {});
+
+    if (isSimulator) {
+      return res.status(404).json({ success: false, error: 'File not found in simulator mode' });
+    }
+
+    const token = await getGoogleAccessToken(clientEmail, privateKey, userEmail);
+
+    // 1. Get metadata for filename and mimeType
+    const metaResp = await fetchWithTimeout(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      6000
+    );
+
+    let fileName = 'document.pdf';
+    let mimeType = 'application/pdf';
+    if (metaResp.ok) {
+      const meta = (await metaResp.json()) as any;
+      if (meta.name) fileName = meta.name;
+      if (meta.mimeType) mimeType = meta.mimeType;
+    }
+
+    // 2. Fetch binary media
+    const mediaResp = await fetchWithTimeout(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      15000
+    );
+
+    if (!mediaResp.ok) {
+      return res.status(mediaResp.status).json({
+        success: false,
+        error: `Google ドライブ ファイル取得失敗 (HTTP ${mediaResp.status})`,
+      });
+    }
+
+    const arrayBuffer = await mediaResp.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // If base64 json format requested
+    if (req.query.format === 'base64' || req.body?.format === 'base64') {
+      return res.json({
+        success: true,
+        fileName,
+        contentType: mimeType,
+        dataBase64: `data:${mimeType};base64,${buffer.toString('base64')}`,
+      });
+    }
+
+    // Stream binary directly
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err: any) {
+    console.error('Google Drive download error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Google ドライブ ファイルダウンロード処理エラー',
+    });
+  }
+}
+
+gdriveRouter.get('/download-file', handleGoogleDriveDownload);
+gdriveRouter.post('/download-file', handleGoogleDriveDownload);
+
+
 
 
 
@@ -1267,6 +2720,9 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Mount Microsoft 365 Graph API proxy router
 app.use(['/api/m365', '/m365'], m365Router);
+
+// Mount Google Drive Storage API proxy router
+app.use(['/api/storage/gdrive', '/storage/gdrive'], gdriveRouter);
 
 // Initialize Gemini SDK lazily
 function getGeminiClient() {

@@ -18,6 +18,9 @@ import {
   User,
   Clock,
   Calendar,
+  Folder,
+  UploadCloud,
+  FolderCheck,
 } from 'lucide-react';
 import { M365Settings } from '../types';
 import {
@@ -28,6 +31,11 @@ import {
   testM365ConnectionViaBackend,
   fetchTenantUsersFromBackend,
 } from '../lib/m365EmailService';
+import {
+  testOneDriveConnection,
+  testGoogleDriveConnection,
+  testCloudStorageConnection,
+} from '../lib/oneDriveService';
 import { getShipments } from '../lib/storageManager';
 
 interface M365SettingsModalProps {
@@ -47,7 +55,19 @@ export const M365SettingsModal: React.FC<M365SettingsModalProps> = ({
     message: string;
     availableUsers?: Array<{ id: string; displayName: string; mail: string; userPrincipalName: string }>;
   } | null>(null);
+  const [oneDriveTestResult, setOneDriveTestResult] = useState<{
+    success: boolean;
+    message: string;
+    folderPath?: string;
+  } | null>(null);
+  const [googleDriveTestResult, setGoogleDriveTestResult] = useState<{
+    success: boolean;
+    message: string;
+    folderPath?: string;
+  } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [isTestingOneDrive, setIsTestingOneDrive] = useState(false);
+  const [isTestingGoogleDrive, setIsTestingGoogleDrive] = useState(false);
   const [isSearchingUsers, setIsSearchingUsers] = useState(false);
   const [tenantUsers, setTenantUsers] = useState<
     Array<{ id: string; displayName: string; mail: string; userPrincipalName: string }>
@@ -62,6 +82,64 @@ export const M365SettingsModal: React.FC<M365SettingsModalProps> = ({
       onSaveAndSync();
     }
     onClose();
+  };
+
+  const handleTestOneDrive = async () => {
+    setIsTestingOneDrive(true);
+    setOneDriveTestResult(null);
+    try {
+      const res = await testOneDriveConnection(settings);
+      setIsTestingOneDrive(false);
+      setOneDriveTestResult({
+        success: res.success,
+        message: res.message,
+        folderPath: res.folderPath,
+      });
+    } catch (err: any) {
+      setIsTestingOneDrive(false);
+      setOneDriveTestResult({
+        success: false,
+        message: `OneDrive 接続テスト失敗: ${err.message || '通信エラーが発生しました'}`,
+      });
+    }
+  };
+
+  const handleTestGoogleDrive = async () => {
+    setIsTestingGoogleDrive(true);
+    setGoogleDriveTestResult(null);
+    try {
+      const res = await testGoogleDriveConnection(settings);
+      setIsTestingGoogleDrive(false);
+      setGoogleDriveTestResult({
+        success: res.success,
+        message: res.message,
+        folderPath: res.folderPath,
+      });
+    } catch (err: any) {
+      setIsTestingGoogleDrive(false);
+      setGoogleDriveTestResult({
+        success: false,
+        message: `Google ドライブ 接続テスト失敗: ${err.message || '通信エラーが発生しました'}`,
+      });
+    }
+  };
+
+  const handleGoogleJsonChange = (rawJson: string) => {
+    let updated = { ...settings, googleDriveServiceAccountKeyJson: rawJson };
+    try {
+      if (rawJson.trim().startsWith('{')) {
+        const parsed = JSON.parse(rawJson.trim());
+        if (parsed.client_email) {
+          updated.googleDriveServiceAccountEmail = parsed.client_email;
+        }
+        if (parsed.private_key) {
+          updated.googleDrivePrivateKey = parsed.private_key;
+        }
+      }
+    } catch {
+      // ignore parse error while typing
+    }
+    setSettings(updated);
   };
 
   const handleTestConnection = async () => {
@@ -236,6 +314,374 @@ export const M365SettingsModal: React.FC<M365SettingsModalProps> = ({
                 本番 Graph API
               </button>
             </div>
+          </div>
+
+          {/* 📁 通関書類保管・自動連携ストレージ設定 (OneDrive ⇄ Google ドライブ 切替対応) */}
+          <div className="p-4 bg-gradient-to-br from-slate-50 via-blue-50/50 to-indigo-50/40 border-2 border-slate-300 rounded-2xl space-y-4 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-3 gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className={`w-9 h-9 rounded-xl text-white flex items-center justify-center shrink-0 shadow-sm transition-colors ${
+                  (settings.storageProvider || 'onedrive') === 'googledrive' ? 'bg-emerald-600' : 'bg-blue-600'
+                }`}>
+                  <Folder className="w-4.5 h-4.5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-xs text-slate-900">📁 通関書類保管・クラウド連携ストレージ設定</h4>
+                    <span className={`px-2 py-0.5 text-white text-[9px] font-bold rounded-full transition-colors ${
+                      (settings.storageProvider || 'onedrive') === 'googledrive' ? 'bg-emerald-600' : 'bg-blue-600'
+                    }`}>
+                      {(settings.storageProvider || 'onedrive') === 'googledrive' ? 'Google ドライブ稼働中' : 'OneDrive稼働中'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    案件のインボイス・非該当判定書・指示書をクラウド保管し、一覧からプレビュー・通関士メールへ自動添付します。
+                  </p>
+                </div>
+              </div>
+
+              {/* Provider Selection Tabs */}
+              <div className="flex items-center bg-white p-1 rounded-xl border border-slate-300 shadow-xs self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setSettings({ ...settings, storageProvider: 'onedrive' })}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    (settings.storageProvider || 'onedrive') === 'onedrive'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  <span>OneDrive</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettings({ ...settings, storageProvider: 'googledrive' })}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    settings.storageProvider === 'googledrive'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  <FolderCheck className="w-3.5 h-3.5" />
+                  <span>Google ドライブ (方式B)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Google Drive Configuration Tab */}
+            {settings.storageProvider === 'googledrive' && (
+              <div className="space-y-3.5 animate-in fade-in duration-200">
+                <div className="flex items-center justify-between bg-emerald-50/80 p-3 rounded-xl border border-emerald-200">
+                  <div className="text-xs text-emerald-950">
+                    <span className="font-bold flex items-center gap-1">
+                      <Sparkles className="w-4 h-4 text-emerald-600" />
+                      Google ドライブ連携 (方式B - 組織管理者不在時の推奨構成)
+                    </span>
+                    <p className="text-[11px] text-emerald-800 mt-0.5">
+                      Power Automateで会社OneDriveから同期されたGoogleドライブ内の <code>/HELLMANN</code> を本システムで直接読み書きします。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTestGoogleDrive}
+                    disabled={isTestingGoogleDrive}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer disabled:opacity-50 shrink-0"
+                    title="Google ドライブのアクセス権限を確認します"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingGoogleDrive ? 'animate-spin' : ''}`} />
+                    <span>{isTestingGoogleDrive ? '確認中...' : 'Google ドライブ 接続テスト'}</span>
+                  </button>
+                </div>
+
+                {/* Google Drive Test Result */}
+                {googleDriveTestResult && (
+                  <div
+                    className={`p-3 rounded-xl border flex items-start gap-2 text-xs ${
+                      googleDriveTestResult.success
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                        : 'bg-rose-50 border-rose-300 text-rose-900'
+                    }`}
+                  >
+                    {googleDriveTestResult.success ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    )}
+                    <div>
+                      <span className="font-bold block">{googleDriveTestResult.message}</span>
+                      {googleDriveTestResult.folderPath && (
+                        <span className="text-[10px] text-emerald-800 font-mono mt-0.5 block">
+                          対象フォルダ: {googleDriveTestResult.folderPath}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Google Service Account JSON Key Input */}
+                <div className="bg-white p-3.5 rounded-xl border border-emerald-200 space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-800 font-bold flex items-center gap-1.5 text-xs">
+                        <Key className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Google サービスアカウント 鍵 JSON (推奨・一発設定):</span>
+                      </label>
+                      <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md font-semibold border border-emerald-200">
+                        貼り付けると自動解析・展開されます
+                      </span>
+                    </div>
+                    <textarea
+                      value={settings.googleDriveServiceAccountKeyJson || ''}
+                      onChange={(e) => handleGoogleJsonChange(e.target.value)}
+                      placeholder='Google Cloud Consoleからダウンロードした service-account.json の中身をそのまま貼り付けてください {"type": "service_account", "client_email": "...", "private_key": "..."}'
+                      rows={3}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2.5 text-slate-800 font-mono text-[11px] focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-slate-100">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1 text-xs">
+                        サービスアカウント Email (client_email):
+                      </label>
+                      <input
+                        type="text"
+                        value={settings.googleDriveServiceAccountEmail || ''}
+                        onChange={(e) => setSettings({ ...settings, googleDriveServiceAccountEmail: e.target.value })}
+                        placeholder="例: hellmann-sync@project-id.iam.gserviceaccount.com"
+                        className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1 text-xs">
+                        Google ドライブ保管フォルダ名 / フォルダID:
+                      </label>
+                      <input
+                        type="text"
+                        value={settings.googleDriveBasePath || 'HELLMANN'}
+                        onChange={(e) => setSettings({ ...settings, googleDriveBasePath: e.target.value })}
+                        placeholder="HELLMANN または フォルダURL"
+                        className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                      />
+                      <span className="text-[10px] text-slate-500 mt-0.5 block">
+                        ※ Google ドライブの共有フォルダURLまたはフォルダ名 <code>HELLMANN</code> を指定
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Private Key textarea if manually editing */}
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1 text-xs">
+                      秘密鍵 (private_key PEM):
+                    </label>
+                    <input
+                      type="password"
+                      value={settings.googleDrivePrivateKey || ''}
+                      onChange={(e) => setSettings({ ...settings, googleDrivePrivateKey: e.target.value })}
+                      placeholder="-----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-700 font-semibold bg-white/80 p-2.5 rounded-lg border border-emerald-100">
+                  <input
+                    type="checkbox"
+                    checked={settings.googleDriveAutoSaveNewOrders ?? true}
+                    onChange={(e) => setSettings({ ...settings, googleDriveAutoSaveNewOrders: e.target.checked })}
+                    className="rounded text-emerald-600 focus:ring-emerald-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>新着通関依頼メールの添付書類（SI・インボイス等）を受信時にGoogle ドライブへ自動保存する</span>
+                </label>
+
+                {/* Setup Guide for Google Drive & Power Automate */}
+                <details className="p-3 bg-emerald-50/60 rounded-xl border border-emerald-200 text-xs text-emerald-950 group">
+                  <summary className="font-bold flex items-center justify-between cursor-pointer list-none select-none">
+                    <span className="flex items-center gap-1.5">
+                      <HelpCircle className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>💡 Google ドライブ ＆ Power Automate 3分かんたん連携手順</span>
+                    </span>
+                    <span className="text-[11px] text-emerald-700 font-normal group-open:rotate-180 transition-transform">▼</span>
+                  </summary>
+                  <div className="pt-2.5 mt-2 border-t border-emerald-200/80 space-y-2 text-[11px] leading-relaxed text-emerald-900">
+                    <p><strong>ステップ 1 (Google Cloud):</strong> Google Cloud Consoleでプロジェクトを作成し、「Google Drive API」を有効化してサービスアカウント（鍵JSON）を作成します。</p>
+                    <p><strong>ステップ 2 (ドライブ共有):</strong> Google ドライブ上に <code>HELLMANN</code> フォルダを作成し、上記サービスアカウントのメールアドレス（<code>xxx@xxx.iam.gserviceaccount.com</code>）を「編集者」として共有します。</p>
+                    <p><strong>ステップ 3 (Power Automate):</strong> 会社OneDriveの <code>/HELLMANN</code> フォルダをトリガーにし、Google ドライブの <code>HELLMANN</code> フォルダへファイル作成・同期するフローを稼働させます。</p>
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {/* Microsoft OneDrive Configuration Tab */}
+            {(settings.storageProvider || 'onedrive') === 'onedrive' && (
+              <div className="space-y-3.5 animate-in fade-in duration-200">
+                <div className="flex items-center justify-between bg-blue-50/80 p-3 rounded-xl border border-blue-200">
+                  <div className="text-xs text-blue-950">
+                    <span className="font-bold flex items-center gap-1">
+                      <Cloud className="w-4 h-4 text-blue-600" />
+                      Microsoft 365 OneDrive 直接連携
+                    </span>
+                    <p className="text-[11px] text-blue-800 mt-0.5">
+                      Microsoft Graph API を使用して、組織または共有アカウントの OneDrive へ直接読み書きします。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTestOneDrive}
+                    disabled={isTestingOneDrive}
+                    className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer disabled:opacity-50 shrink-0"
+                    title="OneDriveフォルダアクセスと権限を確認します"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingOneDrive ? 'animate-spin' : ''}`} />
+                    <span>{isTestingOneDrive ? '接続確認中...' : 'OneDrive 接続テスト'}</span>
+                  </button>
+                </div>
+
+                {/* OneDrive Test Result Message */}
+                {oneDriveTestResult && (
+                  <div
+                    className={`p-3 rounded-xl border flex items-start gap-2 text-xs ${
+                      oneDriveTestResult.success
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                        : 'bg-rose-50 border-rose-300 text-rose-900'
+                    }`}
+                  >
+                    {oneDriveTestResult.success ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    )}
+                    <div>
+                      <span className="font-bold block">{oneDriveTestResult.message}</span>
+                      {oneDriveTestResult.folderPath && (
+                        <span className="text-[10px] text-emerald-800 font-mono mt-0.5 block">
+                          確認フォルダパス: {oneDriveTestResult.folderPath}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-white/90 p-3 rounded-xl border border-blue-100">
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1.5 text-xs">
+                      <UserCheck className="w-3.5 h-3.5 text-blue-600" />
+                      <span>OneDrive 保管用アカウント (メール/UPN):</span>
+                    </label>
+                    <input
+                      type="email"
+                      value={settings.oneDriveUserEmail || ''}
+                      onChange={(e) => setSettings({ ...settings, oneDriveUserEmail: e.target.value })}
+                      placeholder="例: kitatoshiya@gmail.com (空欄時はグループメール)"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">
+                      ※ 空欄の場合は上記共通グループメールまたは認証ユーザーのOneDriveを使用します。
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1.5 text-xs">
+                      <FolderCheck className="w-3.5 h-3.5 text-blue-600" />
+                      <span>OneDrive 基本保管フォルダパス:</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={settings.oneDriveBasePath || '/TAC大阪IBP関連/USER/●サブエージェント/HELLMANN'}
+                      onChange={(e) => setSettings({ ...settings, oneDriveBasePath: e.target.value })}
+                      placeholder="/TAC大阪IBP関連/USER/●サブエージェント/HELLMANN"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">
+                      ※ 案件ごとに <code>/[基本パス]/[YYYYMMDD]/[AWB] [荷受人]</code> が自動作成されます。
+                    </span>
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-700 font-semibold bg-white/70 p-2.5 rounded-lg border border-blue-100">
+                  <input
+                    type="checkbox"
+                    checked={settings.oneDriveAutoSaveNewOrders ?? true}
+                    onChange={(e) => setSettings({ ...settings, oneDriveAutoSaveNewOrders: e.target.checked })}
+                    className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>新着通関依頼メールの添付書類（SI・インボイス等）を受信時にOneDriveへ自動保存する</span>
+                </label>
+
+                {/* Separate OneDrive Tenant / Credentials Toggle */}
+                <div className="bg-white/95 p-3.5 rounded-xl border border-blue-200 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-blue-950 font-bold">
+                    <input
+                      type="checkbox"
+                      checked={settings.useSeparateOneDriveCredentials ?? true}
+                      onChange={(e) => setSettings({ ...settings, useSeparateOneDriveCredentials: e.target.checked })}
+                      className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span className="flex items-center gap-1">
+                      <Shield className="w-3.5 h-3.5 text-blue-600" />
+                      <span>OneDrive専用の認証情報（別ドメイン / 別テナントID）を使用する</span>
+                    </span>
+                    <span className="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 font-normal">
+                      メールとドメインが異なる場合に必須
+                    </span>
+                  </label>
+
+                  {(settings.useSeparateOneDriveCredentials ?? true) && (
+                    <div className="space-y-3 pt-2 border-t border-blue-100/80">
+                      <div className="p-2 bg-blue-50/70 rounded-lg text-[11px] text-blue-900 leading-relaxed border border-blue-100">
+                        💡 <strong>マルチテナント設定:</strong> メール送信用テナントとは別に、OneDrive（例: <code>kita@tac0015.onmicrosoft.com</code>）が所属するテナントで発行したアプリ登録情報を入力してください。
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1.5 text-xs">
+                          <Server className="w-3.5 h-3.5 text-blue-600" />
+                          <span>OneDrive側 テナントID (Directory ID):</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={settings.oneDriveTenantId || ''}
+                          onChange={(e) => setSettings({ ...settings, oneDriveTenantId: e.target.value })}
+                          placeholder="例: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (tac0015のテナントID)"
+                          className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1.5 text-xs">
+                            <Key className="w-3.5 h-3.5 text-blue-600" />
+                            <span>OneDrive側 クライアントID (Application ID):</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={settings.oneDriveClientId || ''}
+                            onChange={(e) => setSettings({ ...settings, oneDriveClientId: e.target.value })}
+                            placeholder="例: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                            className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1.5 text-xs">
+                            <Key className="w-3.5 h-3.5 text-blue-600" />
+                            <span>OneDrive側 クライアントシークレット (鍵):</span>
+                          </label>
+                          <input
+                            type="password"
+                            value={settings.oneDriveClientSecret || ''}
+                            onChange={(e) => setSettings({ ...settings, oneDriveClientSecret: e.target.value })}
+                            placeholder="シークレットの値"
+                            className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Email addresses */}

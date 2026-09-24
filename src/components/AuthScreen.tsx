@@ -105,7 +105,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess }) => {
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-blue-600/20 border border-blue-500/30 text-blue-400 mb-3">
             <ShieldCheck className="w-6 h-6" />
           </div>
-          <h2 className="text-xl font-bold text-white tracking-tight">輸出進捗管理システム</h2>
+          <h2 className="text-xl font-bold text-white tracking-tight">輸出進捗管理システムVer2.0</h2>
           <p className="text-xs text-slate-400 mt-1">Firebase 認証 & 担当者マスタ連動ログイン</p>
         </div>
 

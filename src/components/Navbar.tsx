@@ -180,7 +180,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
               <div>
                 <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white leading-tight">
-                  輸出進捗管理システム
+                  輸出進捗管理システムVer2.0
                 </h1>
                 <p className="text-xs text-slate-400 hidden sm:block mt-0.5">SI (PDF) 自動データ抽出 & リアルタイム進捗追跡</p>
               </div>
