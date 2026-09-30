@@ -49,6 +49,7 @@ import {
   EmailAttachment,
   M365Settings,
   ReplyTemplate,
+  Shipment,
 } from '../types';
 import {
   fetchAllReplyTemplates,
@@ -84,8 +85,9 @@ import {
   fetchMessageAttachmentsFromGraphAPI,
   updateMailAttachmentsInStore,
   saveEmailPayloadToIndexedDB,
+  hydrateGraphMailsFromIndexedDB,
 } from '../lib/m365EmailService';
-import { createShipment, getShipments } from '../lib/storageManager';
+import { createShipment, getShipments, subscribeToStore } from '../lib/storageManager';
 import { cleanHawbNumber, normalizeMawbNumber } from '../lib/awbUtils';
 import { M365SettingsModal } from './M365SettingsModal';
 
@@ -93,6 +95,18 @@ interface M365MailClientProps {
   onClose: () => void;
   onSelectShipment?: (shipmentId: string) => void;
 }
+
+const SESSION_UI_STATE_KEY = 'm365_mail_client_session_ui_state_v1';
+
+const getInitialSessionState = () => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = sessionStorage.getItem(SESSION_UI_STATE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
 
 export const M365MailClient: React.FC<M365MailClientProps> = ({
   onClose,
@@ -102,22 +116,24 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
   const [settings, setSettings] = useState<M365Settings>(getM365Settings());
   const operatorName = currentUser?.displayName || currentOperator?.name || firebaseUser?.displayName || settings.brokerDefaultName || '喜多';
 
+  const initialSession = getInitialSessionState();
+
   // Store states
   const [messages, setMessages] = useState<UnifiedMailItem[]>([]);
-  const [selectedMailId, setSelectedMailId] = useState<string | null>(null);
+  const [selectedMailId, setSelectedMailId] = useState<string | null>(initialSession.selectedMailId || null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Navigation & filter states
-  const [currentFolder, setCurrentFolder] = useState<MailFolderCategory>('INBOX');
-  const [selectedAwbFilter, setSelectedAwbFilter] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'UNREAD' | 'PENDING' | 'DECIDED'>('ALL');
+  const [currentFolder, setCurrentFolder] = useState<MailFolderCategory>(initialSession.currentFolder || 'INBOX');
+  const [selectedAwbFilter, setSelectedAwbFilter] = useState<string | null>(initialSession.selectedAwbFilter || null);
+  const [searchQuery, setSearchQuery] = useState(initialSession.searchQuery || '');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'UNREAD' | 'PENDING' | 'DECIDED'>(initialSession.statusFilter || 'ALL');
 
   // UI state for tree collapse
   const [isInboxTreeOpen, setIsInboxTreeOpen] = useState(true);
   const [isAwbTreeOpen, setIsAwbTreeOpen] = useState(true);
   const [isDecisionTreeOpen, setIsDecisionTreeOpen] = useState(true);
-  const [expandedDateKeys, setExpandedDateKeys] = useState<Record<string, boolean>>({});
+  const [expandedDateKeys, setExpandedDateKeys] = useState<Record<string, boolean>>(initialSession.expandedDateKeys || {});
 
   const toggleDateExpand = (dateKey: string) => {
     setExpandedDateKeys((prev) => ({
@@ -190,6 +206,7 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
   const [editingAwbMailId, setEditingAwbMailId] = useState<string | null>(null);
   const [editMawbInput, setEditMawbInput] = useState('');
   const [editHawbInput, setEditHawbInput] = useState('');
+  const [shipmentStoreVersion, setShipmentStoreVersion] = useState(0);
 
   const startEditingAwb = (mail: UnifiedMailItem) => {
     setEditingAwbMailId(mail.id);
@@ -368,34 +385,72 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
     }
   }, [selectedMailId]);
 
+  // Persist session UI state for seamless restoration across navigation
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      sessionStorage.setItem(
+        SESSION_UI_STATE_KEY,
+        JSON.stringify({
+          selectedMailId,
+          currentFolder,
+          selectedAwbFilter,
+          statusFilter,
+          searchQuery,
+          expandedDateKeys,
+        })
+      );
+    } catch (_) {}
+  }, [selectedMailId, currentFolder, selectedAwbFilter, statusFilter, searchQuery, expandedDateKeys]);
+
   // Load and subscribe to updates
   const reloadMessages = () => {
     const list = getUnifiedMailMessages();
     setMessages(list);
     setSettings(getM365Settings());
-    if (!selectedMailId && list.length > 0) {
-      setSelectedMailId(list[0].id);
-    }
+    setSelectedMailId((prev) => {
+      if (prev && list.some((m) => m.id === prev)) {
+        return prev;
+      }
+      return list.length > 0 ? list[0].id : null;
+    });
   };
 
   useEffect(() => {
+    // 1. Initial immediate load from memory / localStorage
     reloadMessages();
+
+    // 2. Hydrate any extra emails from IndexedDB and update if new items found
+    hydrateGraphMailsFromIndexedDB().then((updated) => {
+      if (updated) {
+        reloadMessages();
+      }
+    });
+
     const unsubscribeStore = subscribeM365Store(() => {
       reloadMessages();
+    });
+
+    const unsubscribeShipments = subscribeToStore(() => {
+      setShipmentStoreVersion((v) => v + 1);
     });
 
     const unsubscribeTimerState = subscribeM365SyncTimerState((state) => {
       setTimerState(state);
     });
 
-    // If production mode is configured, automatically perform an initial sync
+    // If production mode is configured, automatically perform an initial sync only if mail list is empty
     const currentSettings = getM365Settings();
     if (!currentSettings.isDemoMode && currentSettings.tenantId && currentSettings.clientId) {
-      handleSyncRefresh();
+      const existingMails = getUnifiedMailMessages();
+      if (existingMails.length === 0) {
+        handleSyncRefresh();
+      }
     }
 
     return () => {
       unsubscribeStore();
+      unsubscribeShipments();
       unsubscribeTimerState();
     };
   }, []);
@@ -403,7 +458,14 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
   // Date-grouped AWBs for tree
   const { dateAwbGroups, totalAwbCount, unassignedAwbCount } = useMemo(() => {
     const allShipments = getShipments();
-    const awbMap = new Map<string, { count: number; dateKey: string }>();
+    const awbMap = new Map<
+      string,
+      {
+        count: number;
+        dateKey: string;
+        destination?: string | null;
+      }
+    >();
     let unassigned = 0;
 
     const WEEKDAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
@@ -444,52 +506,147 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
       return dateKey;
     };
 
+    // Clean destination code: returns "PVG", "SIN", "CGK", etc., or null if invalid/unknown
+    const cleanDestinationCode = (destStr?: string | null): string | null => {
+      if (!destStr) return null;
+      let s = destStr.trim();
+      if (!s || s === '未設定' || s === '未定' || s === 'N/A' || s === '-' || s.toUpperCase() === 'UNKNOWN') {
+        return null;
+      }
+      s = s.replace(/(?:向け|行き|行)$/i, '').trim();
+      const iataMatch = s.match(/\b([A-Z]{3})\b/);
+      if (iataMatch) {
+        return iataMatch[1].toUpperCase();
+      }
+      const beforeParen = s.match(/^([^()（）]+)\s*[（(]/);
+      if (beforeParen && beforeParen[1].trim()) {
+        return beforeParen[1].trim();
+      }
+      s = s.replace(/^[（(\[\{]+|[）)\]\}]+$/g, '').trim();
+      return s || null;
+    };
+
+    // Find shipment by AWB from 案件情報 (Shipments)
+    const findShipmentForAwb = (
+      targetAwb: string,
+      shipmentIdHint?: string | null
+    ): Shipment | undefined => {
+      if (shipmentIdHint) {
+        const sById = allShipments.find((s) => s.id === shipmentIdHint);
+        if (sById) return sById;
+      }
+      const cleanTarget = targetAwb.replace(/[-\s]/g, '').toLowerCase();
+      if (!cleanTarget) return undefined;
+
+      // 1. Exact match (case & hyphen-insensitive)
+      const exact = allShipments.find((s) => {
+        const sMawb = (s.mawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+        const sHawb = (s.hawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+        const sId = (s.id || '').replace(/[-\s]/g, '').toLowerCase();
+        const sOrd = (s.orderNumber || '').replace(/[-\s]/g, '').toLowerCase();
+        return (
+          (sMawb && sMawb === cleanTarget) ||
+          (sHawb && sHawb === cleanTarget) ||
+          (sId && sId === cleanTarget) ||
+          (sOrd && sOrd === cleanTarget)
+        );
+      });
+      if (exact) return exact;
+
+      // 2. Substring match (e.g. 8-digit vs 11-digit MAWB)
+      if (cleanTarget.length >= 6) {
+        return allShipments.find((s) => {
+          const sMawb = (s.mawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+          const sHawb = (s.hawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+          const sId = (s.id || '').replace(/[-\s]/g, '').toLowerCase();
+          return (
+            (sMawb && (cleanTarget.includes(sMawb) || sMawb.includes(cleanTarget))) ||
+            (sHawb && (cleanTarget.includes(sHawb) || sHawb.includes(cleanTarget))) ||
+            (sId && (cleanTarget.includes(sId) || sId.includes(cleanTarget)))
+          );
+        });
+      }
+      return undefined;
+    };
+
     messages.forEach((m) => {
       if (m.folder === 'TRASH') return;
       const awb = m.mawbNumber || m.hawbNumber;
       if (awb) {
+        // 案件情報 (Shipments) より AWB番号から向け地・通関日を取得
+        const matchedShipment = findShipmentForAwb(
+          awb,
+          m.shipmentId || m.rawHellmannOrder?.processedShipmentId
+        );
+
+        let determinedDateKey: string | null = null;
+        let determinedDest: string | null = null;
+
+        if (matchedShipment?.customsClearanceDate) {
+          determinedDateKey = normalizeDateToKey(matchedShipment.customsClearanceDate);
+        }
+        if (matchedShipment?.destination) {
+          determinedDest = cleanDestinationCode(matchedShipment.destination);
+        }
+        if (!determinedDest && matchedShipment?.flightRoute) {
+          const routeParts = matchedShipment.flightRoute.split(/[→\->]/);
+          if (routeParts.length >= 2) {
+            determinedDest = cleanDestinationCode(routeParts[routeParts.length - 1]);
+          }
+        }
+
+        // メールの件名などからのフォールバック
+        if (!determinedDateKey && m.subject) {
+          const dateMatch = m.subject.match(/(?:^|\s)(20\d{2}[-/])?(\d{1,2})[-/](\d{1,2})/);
+          if (dateMatch) {
+            const y = dateMatch[1] ? dateMatch[1].replace(/[-/]/g, '') : String(new Date().getFullYear());
+            const mon = dateMatch[2].padStart(2, '0');
+            const d = dateMatch[3].padStart(2, '0');
+            determinedDateKey = `${y}-${mon}-${d}`;
+          }
+        }
+        if (!determinedDest && m.subject) {
+          const destSubjectMatch =
+            m.subject.match(/(?:DEST(?:INATION)?|向け地|仕向地)[:\s]*([^\n\r]+)/i) ||
+            m.subject.match(/\b([A-Za-z]{3})向け/);
+          if (destSubjectMatch) {
+            determinedDest = cleanDestinationCode(destSubjectMatch[1]);
+          }
+        }
+
         if (!awbMap.has(awb)) {
-          let determinedDateKey: string | null = null;
-
-          // 1. Shipment から特定
-          const cleanAwb = awb.replace(/[-\s]/g, '').toLowerCase();
-          const matchedShipment = allShipments.find((s) => {
-            if (m.shipmentId && s.id === m.shipmentId) return true;
-            const sMawb = (s.mawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
-            const sHawb = (s.hawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
-            const sId = (s.id || '').replace(/[-\s]/g, '').toLowerCase();
-            return (
-              (sMawb && (sMawb === cleanAwb || cleanAwb.includes(sMawb))) ||
-              (sHawb && (sHawb === cleanAwb || cleanAwb.includes(sHawb))) ||
-              (sId && (sId === cleanAwb || cleanAwb.includes(sId)))
-            );
-          });
-
-          if (matchedShipment?.customsClearanceDate) {
-            determinedDateKey = normalizeDateToKey(matchedShipment.customsClearanceDate);
-          }
-
-          // 2. メールの件名などから特定 (例: "09/17 輸出通関依頼 ...")
-          if (!determinedDateKey && m.subject) {
-            const dateMatch = m.subject.match(/(?:^|\s)(20\d{2}[-/])?(\d{1,2})[-/](\d{1,2})/);
-            if (dateMatch) {
-              const y = dateMatch[1] ? dateMatch[1].replace(/[-/]/g, '') : String(new Date().getFullYear());
-              const mon = dateMatch[2].padStart(2, '0');
-              const d = dateMatch[3].padStart(2, '0');
-              determinedDateKey = `${y}-${mon}-${d}`;
-            }
-          }
-
           awbMap.set(awb, {
             count: 1,
             dateKey: determinedDateKey || '__NO_DATE__',
+            destination: determinedDest || null,
           });
         } else {
           const item = awbMap.get(awb)!;
           item.count += 1;
+          if (!item.destination && determinedDest) {
+            item.destination = determinedDest;
+          }
+          if (item.dateKey === '__NO_DATE__' && determinedDateKey) {
+            item.dateKey = determinedDateKey;
+          }
         }
       } else {
         unassigned += 1;
+      }
+    });
+
+    // 案件情報 (allShipments) を直接参照し、未補完の向け地があれば補完
+    awbMap.forEach((item, awbKey) => {
+      if (!item.destination) {
+        const s = findShipmentForAwb(awbKey);
+        if (s?.destination) {
+          item.destination = cleanDestinationCode(s.destination);
+        } else if (s?.flightRoute) {
+          const routeParts = s.flightRoute.split(/[→\->]/);
+          if (routeParts.length >= 2) {
+            item.destination = cleanDestinationCode(routeParts[routeParts.length - 1]);
+          }
+        }
       }
     });
 
@@ -500,23 +657,23 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
         dateKey: string;
         dateLabel: string;
         isUnknownDate: boolean;
-        awbList: { awb: string; count: number }[];
+        awbList: { awb: string; count: number; destination?: string | null }[];
         totalMailCount: number;
       }
     >();
 
-    awbMap.forEach(({ count, dateKey }, awb) => {
+    awbMap.forEach(({ count, dateKey, destination }, awb) => {
       if (!groupMap.has(dateKey)) {
         groupMap.set(dateKey, {
           dateKey,
           dateLabel: formatDateGroupLabel(dateKey),
           isUnknownDate: dateKey === '__NO_DATE__',
-          awbList: [{ awb, count }],
+          awbList: [{ awb, count, destination }],
           totalMailCount: count,
         });
       } else {
         const g = groupMap.get(dateKey)!;
-        g.awbList.push({ awb, count });
+        g.awbList.push({ awb, count, destination });
         g.totalMailCount += count;
       }
     });
@@ -538,7 +695,7 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
       totalAwbCount: awbMap.size,
       unassignedAwbCount: unassigned,
     };
-  }, [messages]);
+  }, [messages, shipmentStoreVersion]);
 
   // Counters for tree badges
   const counts = useMemo(() => {
@@ -1937,26 +2094,30 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
                         {/* 配下の AWB番号ツリー (展開時のみ表示) */}
                         {isDateOpen && (
                           <div className="space-y-0.5 pl-4 border-l-2 border-indigo-100 ml-3 py-0.5">
-                            {group.awbList.map(({ awb, count }, idx) => (
-                              <button
-                                key={`${group.dateKey}-${awb}-${idx}`}
-                                type="button"
-                                onClick={() => {
-                                  setCurrentFolder('AWB_THREAD');
-                                  setSelectedAwbFilter(awb);
-                                }}
-                                className={`w-full flex items-center justify-between px-2 py-1.2 rounded-lg text-xs font-mono transition-colors cursor-pointer ${
-                                  currentFolder === 'AWB_THREAD' && selectedAwbFilter === awb
-                                    ? 'bg-blue-100 text-blue-900 font-bold border border-blue-300'
-                                    : 'text-slate-600 hover:bg-slate-200/60'
-                                }`}
-                              >
-                                <span className="truncate text-[11px]">{awb}</span>
-                                <span className="text-[10px] text-slate-400 font-bold ml-1">
-                                  ({count})
-                                </span>
-                              </button>
-                            ))}
+                            {group.awbList.map(({ awb, count, destination }, idx) => {
+                              const displayLabel = destination ? `${awb}(${destination})` : awb;
+                              return (
+                                <button
+                                  key={`${group.dateKey}-${awb}-${idx}`}
+                                  type="button"
+                                  onClick={() => {
+                                    setCurrentFolder('AWB_THREAD');
+                                    setSelectedAwbFilter(awb);
+                                  }}
+                                  className={`w-full flex items-center justify-between px-2 py-1.2 rounded-lg text-xs font-mono transition-colors cursor-pointer ${
+                                    currentFolder === 'AWB_THREAD' && selectedAwbFilter === awb
+                                      ? 'bg-blue-100 text-blue-900 font-bold border border-blue-300'
+                                      : 'text-slate-600 hover:bg-slate-200/60'
+                                  }`}
+                                  title={`${displayLabel} (${count}件)`}
+                                >
+                                  <span className="truncate text-[11px]">{displayLabel}</span>
+                                  <span className="text-[10px] text-slate-400 font-bold ml-1 shrink-0">
+                                    ({count})
+                                  </span>
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -2070,7 +2231,16 @@ export const M365MailClient: React.FC<M365MailClientProps> = ({
                   </span>
                 ) : (
                   <span className="font-mono font-bold text-blue-900 bg-white px-2 py-0.5 rounded border border-blue-300">
-                    {selectedAwbFilter || 'すべて'}
+                    {(() => {
+                      if (!selectedAwbFilter) return 'すべて';
+                      for (const g of dateAwbGroups) {
+                        const found = g.awbList.find((item) => item.awb === selectedAwbFilter);
+                        if (found && found.destination) {
+                          return `${found.awb}(${found.destination})`;
+                        }
+                      }
+                      return selectedAwbFilter;
+                    })()}
                   </span>
                 )}
               </div>

@@ -46,6 +46,9 @@ import {
   setMailReadState,
   updateMailSourceType,
   getHellmannNewOrders,
+  getUnifiedMailMessages,
+  getGraphInboxMails,
+  extractRecipientsFromEmailContent,
 } from '../lib/m365EmailService';
 import { updateShipment, cleanCustomsQas } from '../lib/storageManager';
 import {
@@ -385,130 +388,216 @@ export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
     const signature = getUserSignature(currentUser).replace(/\n/g, '<br>');
 
     // ヘルマン関連のメールを検索して、返信・送信用データを取得
-    // この案件に紐づく同期メール一覧（画面上の履歴）から優先して探します。
     const actualMails = getActualEmailsForShipment(shipment) || [];
-    
-    const sortedMails = [...actualMails].sort((a, b) => {
-      if (a.direction === 'INCOMING' && b.direction !== 'INCOMING') return -1;
-      if (a.direction !== 'INCOMING' && b.direction === 'INCOMING') return 1;
-      return 0;
-    });
+    const allUnifiedMails = getUnifiedMailMessages() || [];
+    const graphInboxMails = getGraphInboxMails() || [];
+    const allOrders = getHellmannNewOrders() || [];
 
-    const originalMail = sortedMails.find(
-      (m) =>
-        m.sourceType === 'HELLMANN_ORDER' ||
-        m.sender?.email?.toLowerCase().includes('hellmann.com') ||
-        m.toRecipients?.some((r) => r.toLowerCase().includes('hellmann.com'))
-    );
+    // Distinct candidates to search across
+    const mailCandidates: UnifiedMailItem[] = [];
+    const seenMailIds = new Set<string>();
+    for (const m of [...actualMails, ...graphInboxMails, ...allUnifiedMails]) {
+      if (m && m.id && !seenMailIds.has(m.id)) {
+        seenMailIds.add(m.id);
+        mailCandidates.push(m);
+      }
+    }
+
+    const sMawb = (shipment.mawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+    const sHawb = (shipment.hawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+    const threadId = (shipment.linkedEmailThreadId || '').trim();
+
+    const originalOrder =
+      allOrders.find(
+        (o) =>
+          o.processedShipmentId === shipment.id ||
+          (threadId && (o.messageId === threadId || o.id === threadId))
+      ) ||
+      allOrders.find((o) => {
+        const oMawb = (o.mawbCandidate || '').replace(/[-\s]/g, '').toLowerCase();
+        const oHawb = (o.hawbCandidate || '').replace(/[-\s]/g, '').toLowerCase();
+        return (
+          (sMawb && oMawb && (sMawb === oMawb || sMawb.includes(oMawb) || oMawb.includes(sMawb))) ||
+          (sHawb && oHawb && (sHawb === oHawb || sHawb.includes(oHawb) || oHawb.includes(sHawb)))
+        );
+      });
+
+    // 1. Direct thread or message ID match
+    let originalMail: UnifiedMailItem | undefined = threadId
+      ? mailCandidates.find(
+          (m) =>
+            m.id === threadId ||
+            m.graphMessageId === threadId ||
+            (m as any).conversationId === threadId ||
+            (m as any).messageId === threadId
+        )
+      : undefined;
+
+    // 2. If originalOrder exists, match by order ID or messageId
+    if (!originalMail && originalOrder) {
+      originalMail = mailCandidates.find(
+        (m) =>
+          m.id === originalOrder.id ||
+          m.graphMessageId === originalOrder.messageId ||
+          m.id === `graph_${originalOrder.messageId}` ||
+          (originalOrder.conversationId && (m as any).conversationId === originalOrder.conversationId)
+      );
+    }
+
+    // 3. Match mail by MAWB, HAWB, or Subject across all mail candidates (including mails sent by TAC sales to Hellmann)
+    if (!originalMail) {
+      originalMail = mailCandidates.find((m) => {
+        const mMawb = (m.mawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+        const mHawb = (m.hawbNumber || '').replace(/[-\s]/g, '').toLowerCase();
+        const text = `${m.subject || ''} ${m.body || ''} ${(m.attachments || []).map((a) => a.fileName).join(' ')}`.toLowerCase();
+
+        if (sMawb && (mMawb === sMawb || (sMawb.length >= 7 && text.includes(sMawb)))) return true;
+        if (sHawb && (mHawb === sHawb || (sHawb.length >= 4 && text.includes(sHawb)))) return true;
+        if (shipment.hellmannEmailSubject && m.subject && m.subject.includes(shipment.hellmannEmailSubject.replace(/^Re:\s*/i, ''))) return true;
+        if (m.shipmentId === shipment.id) return true;
+        return false;
+      });
+    }
+
+    // 4. Fallback to first incoming email or first mail
+    if (!originalMail) {
+      originalMail = actualMails.find((m) => m.direction === 'INCOMING') || actualMails[0];
+    }
 
     // メールタイトルは受信した元のメールの先頭に"Re:"を追加
     let defaultSubject = '';
     if (originalMail && originalMail.subject) {
-      defaultSubject = originalMail.subject.startsWith('Re:')
+      defaultSubject = /^re:\s*/i.test(originalMail.subject)
         ? originalMail.subject
         : `Re: ${originalMail.subject}`;
+    } else if (originalOrder && originalOrder.subject) {
+      defaultSubject = /^re:\s*/i.test(originalOrder.subject)
+        ? originalOrder.subject
+        : `Re: ${originalOrder.subject}`;
     } else if (shipment.hellmannEmailSubject) {
-      defaultSubject = shipment.hellmannEmailSubject.startsWith('Re:')
+      defaultSubject = /^re:\s*/i.test(shipment.hellmannEmailSubject)
         ? shipment.hellmannEmailSubject
         : `Re: ${shipment.hellmannEmailSubject}`;
     } else {
       defaultSubject = `Re: 通関照会 HAWB: ${shipment.hawbNumber || shipment.id}`;
     }
 
-    // 宛先 (To) および CC 宛先の動的・高精度特定
-    // ヘルマン社宛ての照会メールであるため、宛先(To)は必ず「hellmann.com」を含むアドレスにします。
-    let defaultTo = 'HMS-JP@hellmann.com';
-    let candidateCcList: string[] = [];
-
-    if (originalMail) {
-      // 元のメールに関連するすべてのアドレスを抽出
-      const allInvolved: string[] = [];
-      if (originalMail.sender?.email) {
-        allInvolved.push(originalMail.sender.email);
-      }
-      if (Array.isArray(originalMail.toRecipients)) {
-        allInvolved.push(...originalMail.toRecipients);
-      }
-      if (Array.isArray(originalMail.ccRecipients)) {
-        allInvolved.push(...originalMail.ccRecipients);
-      }
-
-      // 重複排除
-      const uniqueInvolved = Array.from(new Set(allInvolved.map((e) => e.trim()).filter(Boolean)));
-
-      // 1. 個人のヘルマン担当者アドレス (例: Rio.Tsutsui@hellmann.com 等で、hms-jp 以外のもの) を最優先で To に選定
-      const personalHellmann = uniqueInvolved.find(
-        (e) => e.toLowerCase().includes('hellmann.com') && !e.toLowerCase().includes('hms-jp')
-      );
-
-      if (personalHellmann) {
-        defaultTo = personalHellmann;
-      } else {
-        // 2. なければ HMS-JP@hellmann.com を含む最初の hellmann.com
-        const anyHellmann = uniqueInvolved.find((e) => e.toLowerCase().includes('hellmann.com'));
-        if (anyHellmann) {
-          defaultTo = anyHellmann;
+    // 受信メール・依頼メールから To / CC / 差出人を網羅的に解析
+    const parseRecipientList = (raw: any): string[] => {
+      if (!raw) return [];
+      const list: string[] = [];
+      if (Array.isArray(raw)) {
+        for (const item of raw) {
+          if (typeof item === 'string') {
+            const matches = item.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+            if (matches) list.push(...matches);
+            else if (item.includes('@')) list.push(item.trim());
+          } else if (item && typeof item === 'object') {
+            const addr = item.emailAddress?.address || item.address || item.email;
+            if (typeof addr === 'string' && addr.includes('@')) {
+              list.push(addr.trim());
+            }
+          }
+        }
+      } else if (typeof raw === 'string') {
+        const matches = raw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        if (matches) list.push(...matches);
+        else if (raw.includes('@')) {
+          list.push(...raw.split(/[,;]/).map((s) => s.trim()).filter((s) => s.includes('@')));
         }
       }
+      return list;
+    };
 
-      // Toアドレス以外の、関与している残りの全アドレスをCCの候補とする
-      candidateCcList = uniqueInvolved.filter(
-        (e) => e.toLowerCase() !== defaultTo.toLowerCase()
-      );
+    const embeddedRecips = extractRecipientsFromEmailContent(
+      originalMail?.body || originalOrder?.bodyText,
+      originalMail?.bodyHtml || originalOrder?.bodyHtml
+    );
+
+    // 元メールの宛先 (To) リスト
+    const rawToCandidates = [
+      ...parseRecipientList(originalMail?.toRecipients),
+      ...parseRecipientList(originalOrder?.toRecipients),
+      ...parseRecipientList(originalMail?.rawHellmannOrder?.toRecipients),
+      ...embeddedRecips.to,
+    ];
+    const cleanToSet = new Set<string>();
+    rawToCandidates.forEach((t) => {
+      const clean = t.trim().toLowerCase();
+      if (clean && clean.includes('@')) cleanToSet.add(clean);
+    });
+
+    // 元メールのCC (CC) リスト
+    const rawCcCandidates = [
+      ...parseRecipientList(originalMail?.ccRecipients),
+      ...parseRecipientList(originalOrder?.ccRecipients),
+      ...parseRecipientList(originalMail?.rawHellmannOrder?.ccRecipients),
+      ...parseRecipientList((originalMail as any)?.cc),
+      ...embeddedRecips.cc,
+    ];
+    const cleanCcSet = new Set<string>();
+    rawCcCandidates.forEach((c) => {
+      const clean = c.trim().toLowerCase();
+      if (clean && clean.includes('@')) cleanCcSet.add(clean);
+    });
+
+    const senderEmail = (
+      originalMail?.sender?.email ||
+      originalOrder?.senderEmail ||
+      originalMail?.rawHellmannOrder?.senderEmail ||
+      ''
+    ).trim();
+
+    // 1. 送信宛先 (To): ヘルマン社の担当者を優先決定
+    let resolvedTo = '';
+    if (senderEmail.toLowerCase().includes('hellmann.com')) {
+      resolvedTo = senderEmail;
     } else {
-      // 予備で従来の getHellmannNewOrders からもCCをマージ
-      const allOrders = getHellmannNewOrders() || [];
-      const originalOrder = allOrders.find(
-        (o) =>
-          o.processedShipmentId === shipment.id ||
-          (shipment.linkedEmailThreadId && (o.messageId === shipment.linkedEmailThreadId || o.id === shipment.linkedEmailThreadId))
-      );
-      if (originalOrder) {
-        const orderInvolved = [
-          ...(originalOrder.senderEmail ? [originalOrder.senderEmail] : []),
-          ...(originalOrder.toRecipients || []),
-          ...(originalOrder.ccRecipients || [])
-        ].map((e) => e.trim()).filter(Boolean);
-
-        candidateCcList = Array.from(new Set(orderInvolved)).filter(
-          (e) => e.toLowerCase() !== defaultTo.toLowerCase()
-        );
+      // 差出人が社内の場合、元の To または CC に含まれるヘルマン担当者アドレスを特定
+      const hellmannTo = Array.from(cleanToSet).find((t) => t.includes('hellmann.com') && !t.startsWith('tac-'));
+      if (hellmannTo) {
+        resolvedTo = hellmannTo;
+      } else {
+        const hellmannCc = Array.from(cleanCcSet).find((c) => c.includes('hellmann.com') && !c.startsWith('tac-'));
+        if (hellmannCc) {
+          resolvedTo = hellmannCc;
+        } else if (senderEmail) {
+          resolvedTo = senderEmail;
+        } else {
+          resolvedTo = 'HMS-JP@hellmann.com';
+        }
       }
     }
 
-    // 共有グループアドレスをCCに追加（まだ無ければ）
-    const groupMail = m365Settings.groupEmail || 'tac-hellmann@tac-japan.co.jp';
-    let ccList = [...candidateCcList];
-    if (groupMail && !ccList.some((email) => email.toLowerCase() === groupMail.toLowerCase())) {
-      ccList.push(groupMail);
+    const defaultTo = resolvedTo;
+    const defaultToLower = defaultTo.toLowerCase().trim();
+
+    // 2. CC宛先: 共通メールハブの「全員返信」と同様に、
+    // 元メールの差出人・宛先・CCの全関係者から、今回の送信宛先 (defaultTo) を除いたアドレスをCCに設定
+    const finalCcSet = new Set<string>();
+
+    if (senderEmail && senderEmail.toLowerCase() !== defaultToLower) {
+      finalCcSet.add(senderEmail);
     }
 
-    // Toアドレスと完全に一致するアドレス、および空文字はCCから除外
-    const cleanCcList = ccList
-      .map((c) => c.trim())
-      .filter((c) => !!c && c.toLowerCase() !== defaultTo.toLowerCase());
-
-    // プロフェショナルな配置のためにCCリストを並び替え
-    // 1. グループ共有アドレス (tac-hellmann@tac-japan.co.jp)
-    // 2. その他のヘルマンアドレス (HMS-JP@hellmann.com 等)
-    // 3. 自社・担当者アドレス (kita@tac-japan.co.jp 等)
-    const sortedCcList = Array.from(new Set(cleanCcList)).sort((a, b) => {
-      const aLower = a.toLowerCase();
-      const bLower = b.toLowerCase();
-      const groupMailLower = groupMail.toLowerCase();
-
-      if (aLower === groupMailLower) return -1;
-      if (bLower === groupMailLower) return 1;
-
-      const aIsHellmann = aLower.includes('hellmann.com');
-      const bIsHellmann = bLower.includes('hellmann.com');
-      if (aIsHellmann && !bIsHellmann) return -1;
-      if (!aIsHellmann && bIsHellmann) return 1;
-
-      return 0;
+    cleanToSet.forEach((t) => {
+      if (t !== defaultToLower) {
+        finalCcSet.add(t);
+      }
     });
 
-    const defaultCc = sortedCcList.join('; ') || groupMail;
+    cleanCcSet.forEach((c) => {
+      if (c !== defaultToLower) {
+        finalCcSet.add(c);
+      }
+    });
+
+    // ヘルマン共通窓口 HMS-JP@hellmann.com の補完 (Toがヘルマン個人でCCにまだない場合)
+    if (!finalCcSet.has('hms-jp@hellmann.com') && !finalCcSet.has('HMS-JP@hellmann.com') && defaultToLower.includes('hellmann.com') && defaultToLower !== 'hms-jp@hellmann.com') {
+      finalCcSet.add('HMS-JP@hellmann.com');
+    }
+
+    const defaultCc = Array.from(finalCcSet).join('; ');
 
     // HAWB/MAWB表示の重複を排除
     let keyDisplay = '';
@@ -520,38 +609,36 @@ export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
       keyDisplay = `管理ID: ${shipment.id}`;
     }
 
-    // 元の通関依頼メール（ヘルマン社から受信したINCOMINGメール）を特定
-    const allOrders = getHellmannNewOrders() || [];
-    const originalOrder = allOrders.find(
-      (o) =>
-        o.processedShipmentId === shipment.id ||
-        (shipment.linkedEmailThreadId && (o.messageId === shipment.linkedEmailThreadId || o.id === shipment.linkedEmailThreadId))
-    );
-
-    // 万が一見つからない場合は、同期メール一覧から受信メール(INCOMING)を探す
-    const fallbackIncomingMail = actualMails.find(
-      (m) =>
-        m.direction === 'INCOMING' &&
-        (m.sourceType === 'HELLMANN_ORDER' || m.sender?.email?.toLowerCase().includes('hellmann.com'))
-    );
-
     let quoteHtml = '';
 
-    if (originalOrder) {
-      const fromStr = `${originalOrder.senderName || ''} &lt;${originalOrder.senderEmail || ''}&gt;`;
-      const toStr = Array.isArray(originalOrder.toRecipients) ? originalOrder.toRecipients.join('; ') : '';
-      const ccStr = Array.isArray(originalOrder.ccRecipients) ? originalOrder.ccRecipients.join('; ') : '';
-      const receivedDate = originalOrder.receivedDateTime ? new Date(originalOrder.receivedDateTime).toLocaleString('ja-JP') : '';
+    if (originalMail || originalOrder) {
+      const fromStr = originalMail?.sender
+        ? `${originalMail.sender.name || ''} &lt;${originalMail.sender.email || ''}&gt;`
+        : originalOrder
+        ? `${originalOrder.senderName || ''} &lt;${originalOrder.senderEmail || ''}&gt;`
+        : '';
       
+      const toStr = Array.from(cleanToSet).join('; ') || (Array.isArray(originalMail?.toRecipients) ? originalMail.toRecipients.join('; ') : '');
+      const ccStr = Array.from(cleanCcSet).join('; ') || (Array.isArray(originalMail?.ccRecipients) ? originalMail.ccRecipients.join('; ') : '') || defaultCc;
+      
+      const receivedDate = originalMail?.receivedOrSentAt
+        ? new Date(originalMail.receivedOrSentAt).toLocaleString('ja-JP')
+        : originalOrder?.receivedDateTime
+        ? new Date(originalOrder.receivedDateTime).toLocaleString('ja-JP')
+        : '';
+
+      const subjectStr = originalMail?.subject || originalOrder?.subject || '';
+
       let mailBodyStr = '';
-      if (originalOrder.bodyHtml && originalOrder.bodyHtml.trim()) {
+      if (originalMail?.bodyHtml && originalMail.bodyHtml.trim()) {
+        const hasHtmlTags = /<[a-z][\s\S]*>/i.test(originalMail.bodyHtml);
+        mailBodyStr = hasHtmlTags ? originalMail.bodyHtml : originalMail.bodyHtml.replace(/\r?\n/g, '<br>');
+      } else if (originalOrder?.bodyHtml && originalOrder.bodyHtml.trim()) {
         const hasHtmlTags = /<[a-z][\s\S]*>/i.test(originalOrder.bodyHtml);
-        if (hasHtmlTags) {
-          mailBodyStr = originalOrder.bodyHtml;
-        } else {
-          mailBodyStr = originalOrder.bodyHtml.replace(/\r?\n/g, '<br>');
-        }
-      } else if (originalOrder.bodyText) {
+        mailBodyStr = hasHtmlTags ? originalOrder.bodyHtml : originalOrder.bodyHtml.replace(/\r?\n/g, '<br>');
+      } else if (originalMail?.body) {
+        mailBodyStr = originalMail.body.replace(/\r?\n/g, '<br>');
+      } else if (originalOrder?.bodyText) {
         mailBodyStr = originalOrder.bodyText.replace(/\r?\n/g, '<br>');
       }
 
@@ -562,48 +649,23 @@ export const CustomsQaRelayPanel: React.FC<CustomsQaRelayPanelProps> = ({
 <p style="margin: 0 0 4px 0;"><b>Sent:</b> ${receivedDate}</p>
 <p style="margin: 0 0 4px 0;"><b>To:</b> ${toStr}</p>
 ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
-<p style="margin: 0 0 0 0;"><b>Subject:</b> ${originalOrder.subject || ''}</p>
-</div>
-<div style="font-family: 'Segoe UI', Meiryo, sans-serif; color: #1e293b; line-height: 1.6;">${mailBodyStr}</div>
-</div>`;
-
-    } else if (fallbackIncomingMail) {
-      const fromStr = fallbackIncomingMail.sender ? `${fallbackIncomingMail.sender.name || ''} &lt;${fallbackIncomingMail.sender.email || ''}&gt;` : '';
-      const toStr = Array.isArray(fallbackIncomingMail.toRecipients) ? fallbackIncomingMail.toRecipients.join('; ') : (fallbackIncomingMail.toRecipients || '');
-      const ccStr = Array.isArray(fallbackIncomingMail.ccRecipients) ? fallbackIncomingMail.ccRecipients.join('; ') : (fallbackIncomingMail.ccRecipients || '');
-      const receivedDate = fallbackIncomingMail.receivedOrSentAt ? new Date(fallbackIncomingMail.receivedOrSentAt).toLocaleString('ja-JP') : '';
-      
-      let mailBodyStr = '';
-      if (fallbackIncomingMail.bodyHtml && fallbackIncomingMail.bodyHtml.trim()) {
-        const hasHtmlTags = /<[a-z][\s\S]*>/i.test(fallbackIncomingMail.bodyHtml);
-        if (hasHtmlTags) {
-          mailBodyStr = fallbackIncomingMail.bodyHtml;
-        } else {
-          mailBodyStr = fallbackIncomingMail.bodyHtml.replace(/\r?\n/g, '<br>');
-        }
-      } else if (fallbackIncomingMail.body) {
-        mailBodyStr = fallbackIncomingMail.body.replace(/\r?\n/g, '<br>');
-      }
-
-      quoteHtml = `<br><br><div style="border-left: 3px solid #0284c7; padding-left: 16px; margin-left: 4px; color: #1e293b; font-size: 13.5px; line-height: 1.6;">
-<p style="margin: 0 0 8px 0; color: #0284c7; font-weight: bold; font-size: 13px;">-----Original Message-----</p>
-<div style="background-color: #f8fafc; padding: 12px 16px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 12px; color: #475569; font-size: 12.5px; line-height: 1.5;">
-<p style="margin: 0 0 4px 0;"><b>From:</b> ${fromStr}</p>
-<p style="margin: 0 0 4px 0;"><b>Sent:</b> ${receivedDate}</p>
-<p style="margin: 0 0 4px 0;"><b>To:</b> ${toStr}</p>
-${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
-<p style="margin: 0 0 0 0;"><b>Subject:</b> ${fallbackIncomingMail.subject || ''}</p>
+<p style="margin: 0 0 0 0;"><b>Subject:</b> ${subjectStr}</p>
 </div>
 <div style="font-family: 'Segoe UI', Meiryo, sans-serif; color: #1e293b; line-height: 1.6;">${mailBodyStr}</div>
 </div>`;
     }
 
-    // メール本文の修正
-    // ”ヘルマン社 担当者様”→”ヘルマンワールドワイドロジスティクス株式会社　ご担当者様”
-    // ”お疲れ様です。”→”いつもお世話になっております。”＋改行
-    const defaultBody =
+    // メール本文の作成
+    let defaultBody =
       inquiryDrafts[qa.id] ||
-      `ヘルマンワールドワイドロジスティクス株式会社　ご担当者様<br><br>いつもお世話になっております。<br><br>本件 (${keyDisplay}) の通関手配につきまして、<br>社内通関士より以下の照会が届いております。<br><br>【通関士からの照会内容】<br>${formattedQuestion}<br><br>お手数ですが、荷主（Shipper）様にご確認の上、ご回答いただけますようお願い申し上げます。<br><br>${signature}${quoteHtml}`;
+      `ヘルマンワールドワイドロジスティクス株式会社　ご担当者様<br><br>いつもお世話になっております。<br><br>本件 (${keyDisplay}) の通関手配につきまして、<br>社内通関士より以下の照会が届いております。<br><br>【通関士からの照会内容】<br>${formattedQuestion}<br><br>お手数ですが、ご確認の上、ご回答いただけますようお願い申し上げます。<br><br>${signature}${quoteHtml}`;
+
+    defaultBody = defaultBody
+      .replace(/ご確認の上、ご回答いただけますようお願い申し上げます。/g, 'お手数ですが、ご確認の上、ご回答いただけますようお願い申し上げます。')
+      .replace(/ご確認の上、ご回答いただけますようお願い申し上げます。/g, 'お手数ですが、ご確認の上、ご回答いただけますようお願い申し上げます。')
+      .replace(/ご確認の上、ご回答いただけますようお願い申し上げます。/g, 'お手数ですが、ご確認の上、ご回答いただけますようお願い申し上げます。')
+      .replace(/ご確認の上、ご回答いただけますようお願い申し上げます。/g, 'お手数ですが、ご確認の上、ご回答いただけますようお願い申し上げます。')
+      .replace(/お手数ですが、お手数ですが、/g, 'お手数ですが、');
 
     setInquiryModal({
       isOpen: true,
@@ -780,7 +842,7 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
 
     const defaultBody =
       brokerReplyDrafts[qa.id] ||
-      `${brokerSalutation}<br><br>お疲れ様です。照会いただいておりました件、ヘルマン社および荷主様より回答および関連資料を受領いたしました。<br><br>【回答内容】<br>${answerHtml}<br><br>ご確認の上、申告手続きを進めていただけますと幸いです。<br><br>${signature}${quoteHtml}`;
+      `${brokerSalutation}<br><br>お疲れ様です。照会いただいておりました件、ヘルマン社より回答および関連資料を受領いたしました。<br><br>【回答内容】<br>${answerHtml}<br><br>ご確認の上、申告手続きを進めていただけますと幸いです。<br><br>${signature}${quoteHtml}`;
 
     const initialAtts = (
       forwardAttachmentsSelected[qa.id] !== false
@@ -987,7 +1049,7 @@ ${ccStr ? `<p style="margin: 0 0 4px 0;"><b>Cc:</b> ${ccStr}</p>` : ''}
     const brokerQuestionBody = brokerMail?.body || qa.brokerQuestion.questionText || '';
     const answerText = qa.hellmannAnswer?.answerText || '荷主より回答を受領しました。';
 
-    const plainBody = `${brokerSalutation}\nお疲れ様です。照会いただいておりました件、ヘルマン社および荷主様より回答および関連資料を受領いたしました。\n\n【回答内容】\n${answerText}\n\nご確認の上、申告手続きを進めていただけますと幸いです。\n\n${signature}\n\n-----Original Message-----\nFrom: ${qa.brokerQuestion.brokerName || '社内通関士'} <${recipient}>\nSent: ${qa.brokerQuestion.askedAt ? new Date(qa.brokerQuestion.askedAt).toLocaleString('ja-JP') : ''}\nSubject: ${brokerSubject}\n\n${brokerQuestionBody}`;
+    const plainBody = `${brokerSalutation}\nお疲れ様です。照会いただいておりました件、ヘルマン社より回答および関連資料を受領いたしました。\n\n【回答内容】\n${answerText}\n\nご確認の上、申告手続きを進めていただけますと幸いです。\n\n${signature}\n\n-----Original Message-----\nFrom: ${qa.brokerQuestion.brokerName || '社内通関士'} <${recipient}>\nSent: ${qa.brokerQuestion.askedAt ? new Date(qa.brokerQuestion.askedAt).toLocaleString('ja-JP') : ''}\nSubject: ${brokerSubject}\n\n${brokerQuestionBody}`;
 
     const subject = encodeURIComponent(brokerSubject);
     const body = encodeURIComponent(brokerReplyDrafts[qa.id] ? brokerReplyDrafts[qa.id].replace(/<br>/g, '\n').replace(/<[^>]+>/g, '') : plainBody);

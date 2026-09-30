@@ -1,12 +1,13 @@
 // IndexedDB-backed service for permanent offloading of large email bodies and attachments
 // Prevents browser localStorage QuotaExceededError while retaining full fidelity of email data.
-import { EmailAttachment } from '../types';
+import { EmailAttachment, UnifiedMailItem } from '../types';
 
 export interface StoredEmailPayload {
   mailId: string;
   bodyHtml?: string;
   bodyText?: string;
   attachments?: EmailAttachment[];
+  mailItems?: UnifiedMailItem[];
   updatedAt: number;
 }
 
@@ -177,6 +178,70 @@ export async function getEmailPayload(mailId: string): Promise<StoredEmailPayloa
   } catch (err) {
     console.warn(`[EmailStorage] Error fetching payload for '${mailId}':`, err);
     return null;
+  }
+}
+
+/**
+ * Persist an entire list of Graph emails (Inbox or Sent) to IndexedDB
+ */
+export async function saveGraphMailListToIndexedDB(
+  folder: 'inbox' | 'sent',
+  mails: UnifiedMailItem[]
+): Promise<void> {
+  if (!Array.isArray(mails)) return;
+  const key = folder === 'inbox' ? '__system_graph_inbox__' : '__system_graph_sent__';
+  const record: StoredEmailPayload = {
+    mailId: key,
+    mailItems: mails,
+    updatedAt: Date.now(),
+  };
+  memoryCache.set(key, record);
+
+  try {
+    const db = await openEmailDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(record);
+    await new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(new Error('Transaction aborted'));
+    });
+  } catch (err) {
+    console.warn(`[EmailStorage] Failed to persist Graph ${folder} list to IndexedDB:`, err);
+  }
+}
+
+/**
+ * Retrieve the persisted Graph email list from IndexedDB or memory cache
+ */
+export async function getGraphMailListFromIndexedDB(
+  folder: 'inbox' | 'sent'
+): Promise<UnifiedMailItem[]> {
+  const key = folder === 'inbox' ? '__system_graph_inbox__' : '__system_graph_sent__';
+  const cached = memoryCache.get(key);
+  if (cached && Array.isArray(cached.mailItems) && cached.mailItems.length > 0) {
+    return cached.mailItems;
+  }
+
+  try {
+    const db = await openEmailDb();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.get(key);
+    const result = await new Promise<StoredEmailPayload | null>((res, rej) => {
+      req.onsuccess = () => res(req.result || null);
+      req.onerror = () => rej(req.error);
+    });
+
+    if (result && Array.isArray(result.mailItems)) {
+      memoryCache.set(key, result);
+      return result.mailItems;
+    }
+    return [];
+  } catch (err) {
+    console.warn(`[EmailStorage] Error fetching Graph ${folder} list from IndexedDB:`, err);
+    return [];
   }
 }
 

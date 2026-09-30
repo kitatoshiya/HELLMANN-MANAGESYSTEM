@@ -124,20 +124,20 @@ export const OneDriveDocumentManager: React.FC<OneDriveDocumentManagerProps> = (
   const providerName = '共有ドライブ';
   const folderPath = getShipmentOneDriveFolderPath(shipment, settings);
 
-  // Compute standard main folder display name (e.g. "PTY 057-59328813 MV BERGE SCAFELL PIKE")
+  // Compute standard main folder display name (matches target shipment)
   const mainFolderName = useMemo(() => {
     for (const f of files) {
       if (f.folderPath) {
         const base = f.folderPath.split('/')[0];
-        if (base && (base.includes('PTY') || base.includes('59328813') || base.includes('BERGE'))) {
-          return base;
+        if (base && base.trim()) {
+          return base.trim();
         }
       }
     }
-    const awb = shipment.hawbNumber || shipment.mawbNumber || '057-59328813';
-    const vessel = shipment.consignee || 'BERGE SCAFELL PIKE';
-    const cleanVessel = vessel.startsWith('MV ') ? vessel : `MV ${vessel}`;
-    return `PTY ${awb} ${cleanVessel}`.replace(/\s+/g, ' ').trim();
+    const awb = shipment.hawbNumber || shipment.mawbNumber || shipment.orderNumber || shipment.id;
+    const vessel = shipment.consignee ? (shipment.consignee.startsWith('MV ') ? shipment.consignee : `MV ${shipment.consignee}`) : '';
+    const dest = shipment.destination || 'HELLMANN';
+    return `${dest} ${awb} ${vessel}`.replace(/\s+/g, ' ').trim();
   }, [files, shipment]);
 
   // Extract unique subfolders detected across files (e.g. "K")
@@ -148,8 +148,6 @@ export const OneDriveDocumentManager: React.FC<OneDriveDocumentManagerProps> = (
         set.add(f.subfolder.trim());
       }
     });
-    // Ensure "K" is always available
-    set.add('K');
     return Array.from(set).sort();
   }, [files]);
 

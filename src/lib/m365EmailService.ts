@@ -20,6 +20,8 @@ import {
   getEmailPayload,
   getEmailPayloadSync,
   getAttachmentDataUrl,
+  saveGraphMailListToIndexedDB,
+  getGraphMailListFromIndexedDB,
 } from './emailPayloadStorageService';
 
 export {
@@ -28,6 +30,8 @@ export {
   getEmailPayload,
   getEmailPayloadSync,
   getAttachmentDataUrl,
+  saveGraphMailListToIndexedDB,
+  getGraphMailListFromIndexedDB,
 };
 
 const M365_SETTINGS_KEY = 'export_mgmt_m365_settings';
@@ -35,8 +39,67 @@ const HELLMANN_ORDERS_KEY = 'export_mgmt_hellmann_new_orders';
 const BROKER_INCOMING_EMAILS_KEY = 'export_mgmt_broker_incoming_emails_v1';
 const GRAPH_INBOX_MAILS_KEY = 'export_mgmt_graph_inbox_mails_v1';
 const GRAPH_SENT_MAILS_KEY = 'export_mgmt_graph_sent_mails_v1';
+const HAS_REAL_SYNC_KEY = 'export_mgmt_has_real_m365_sync';
 const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
 const M365_CONFIG_DOC = 'm365_config';
+
+// In-Memory persistent caches to prevent state loss during unmount/navigation
+let cachedGraphInboxMails: UnifiedMailItem[] | null = null;
+let cachedGraphSentMails: UnifiedMailItem[] | null = null;
+let isHydratingGraphMails = false;
+
+export function hasRealM365EmailsSynced(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (cachedGraphInboxMails && cachedGraphInboxMails.length > 0) return true;
+  return localStorage.getItem(HAS_REAL_SYNC_KEY) === 'true';
+}
+
+export function markRealM365EmailsSynced(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(HAS_REAL_SYNC_KEY, 'true');
+  } catch (_) {}
+}
+
+/**
+ * Asynchronously hydrate Graph emails from IndexedDB on startup or screen change
+ */
+export async function hydrateGraphMailsFromIndexedDB(): Promise<boolean> {
+  if (typeof window === 'undefined' || isHydratingGraphMails) return false;
+  isHydratingGraphMails = true;
+  try {
+    const [inbox, sent] = await Promise.all([
+      getGraphMailListFromIndexedDB('inbox'),
+      getGraphMailListFromIndexedDB('sent'),
+    ]);
+    let hasUpdated = false;
+    if (inbox && inbox.length > 0) {
+      cachedGraphInboxMails = inbox;
+      markRealM365EmailsSynced();
+      hasUpdated = true;
+    }
+    if (sent && sent.length > 0) {
+      cachedGraphSentMails = sent;
+      hasUpdated = true;
+    }
+    if (hasUpdated) {
+      notifyListeners();
+    }
+    return hasUpdated;
+  } catch (err) {
+    console.warn('[Storage] Failed to hydrate Graph mails from IndexedDB:', err);
+    return false;
+  } finally {
+    isHydratingGraphMails = false;
+  }
+}
+
+// Auto-trigger hydration on module load in browser
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    hydrateGraphMailsFromIndexedDB().catch(() => {});
+  }, 100);
+}
 
 // Event listeners for reactive store updates
 const listeners = new Set<() => void>();
@@ -834,10 +897,16 @@ export function extractLogisticsInfoFromEmailText(bodyText: string, subjectText:
     result.destination = destMatch[1].replace(/^[・\s*]+/, '').trim();
     matchCount += 1;
   } else {
-    const iataCity = combined.match(/\b(LAX|FRA|ORD|JFK|SIN|HKG|LHR|CDG|BKK|TPE|ICN|SFO|DFW|SYD|AMS)\b/i);
-    if (iataCity) {
-      result.destination = iataCity[1].toUpperCase();
+    const directDestMatch = combined.match(/\b([A-Za-z]{3})向け/);
+    if (directDestMatch) {
+      result.destination = directDestMatch[1].toUpperCase();
       matchCount += 1;
+    } else {
+      const iataCity = combined.match(/\b(PVG|SHA|CAN|PEK|NKG|DLC|TAO|XMN|SIN|HKG|BKK|TPE|KUL|ICN|MNL|SGN|HAN|CGK|LAX|FRA|ORD|JFK|LHR|CDG|SFO|DFW|SYD|AMS)\b/i);
+      if (iataCity) {
+        result.destination = iataCity[1].toUpperCase();
+        matchCount += 1;
+      }
     }
   }
 
@@ -894,28 +963,77 @@ export function extractLogisticsInfoFromEmailText(bodyText: string, subjectText:
 export function extractRecipientsFromEmailContent(bodyText?: string, bodyHtml?: string): { to: string[]; cc: string[] } {
   const toList: string[] = [];
   const ccList: string[] = [];
-  const combined = `${bodyText || ''}\n${bodyHtml ? bodyHtml.replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n').replace(/<[^>]+>/g, ' ') : ''}`;
-  if (!combined.trim()) return { to: toList, cc: ccList };
+  const rawCombined = `${bodyText || ''}\n${bodyHtml || ''}`;
+  if (!rawCombined.trim()) return { to: toList, cc: ccList };
 
-  const lines = combined.split(/\r?\n/);
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+  // 1. Line-by-line inspection with normalized newlines
+  const plain = rawCombined
+    .replace(/<br\s*[\/]?>/gi, '\n')
+    .replace(/<\/(?:p|div|tr|h\d)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  const lines = plain.split(/\r?\n/);
+  let currentHeader: 'to' | 'cc' | null = null;
+
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (/^(?:To|宛先|送信先|To Recipients|宛先アドレス)[:：]/i.test(line)) {
-      const matches = line.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-      if (matches) {
-        toList.push(...matches.map((m) => m.toLowerCase()));
-      }
-    } else if (/^(?:Cc|CC|カーボンコピー)[:：]/i.test(line)) {
-      const matches = line.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-      if (matches) {
-        ccList.push(...matches.map((m) => m.toLowerCase()));
+    if (!line) {
+      currentHeader = null;
+      continue;
+    }
+
+    const isToHeader = /^(?:To|宛先|送信先|To\s*Recipients|宛先アドレス)\s*[:：]/i.test(line);
+    const isCcHeader = /^(?:Cc|CC|ＣＣ|カーボンコピー|写し|Cc\s*Recipients|CC\s*Recipients|CC宛先|Cc宛先|Carbon\s*Copy(?:\s*\([Cc]\))?)\s*[:：;]/i.test(line);
+    const isOtherHeader = /^(?:From|差出人|送信元|Subject|件名|Date|送信日時|受信日時|Sent|Received)\s*[:：]/i.test(line);
+
+    if (isToHeader) {
+      currentHeader = 'to';
+      const emails = line.match(emailRegex);
+      if (emails) toList.push(...emails.map((e) => e.toLowerCase()));
+    } else if (isCcHeader) {
+      currentHeader = 'cc';
+      const emails = line.match(emailRegex);
+      if (emails) ccList.push(...emails.map((e) => e.toLowerCase()));
+    } else if (isOtherHeader) {
+      currentHeader = null;
+    } else if (currentHeader) {
+      // Continuation line for multi-line recipient list (indented or wrapped)
+      const emails = line.match(emailRegex);
+      if (emails) {
+        if (currentHeader === 'to') toList.push(...emails.map((e) => e.toLowerCase()));
+        if (currentHeader === 'cc') ccList.push(...emails.map((e) => e.toLowerCase()));
+      } else if (!line.includes('@') && !line.includes(';') && !line.includes(',')) {
+        currentHeader = null;
       }
     }
   }
 
+  // 2. Direct regex extraction from original raw content (HTML/plain) for any embedded Cc patterns
+  const rawCcRegex = /(?:^|[\r\n<>\/]|<b>|<strong>|<p>|<div>)(?:Cc|CC|ＣＣ|カーボンコピー|写し|CC宛先|Cc宛先|Carbon\s*Copy)(?:\s*(?:\([Cc]\))?)\s*[:：;]([^\r\n<>\/]*?(?:@[^\r\n<>]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = rawCcRegex.exec(rawCombined)) !== null) {
+    const chunk = match[1];
+    const emails = chunk.match(emailRegex);
+    if (emails) {
+      ccList.push(...emails.map((e) => e.toLowerCase()));
+    }
+  }
+
+  // 3. Look for Cc blocks ending before Subject/From/To/Date
+  const blockCcRegex = /(?:Cc|CC|ＣＣ|カーボンコピー|写し|CC宛先|Cc宛先)\s*[:：]\s*([\s\S]{1,500}?)(?=(?:\r?\n\s*(?:Subject|件名|From|差出人|To|宛先|Date|日時|本文|-----)|<div|<p|$))/gi;
+  while ((match = blockCcRegex.exec(rawCombined)) !== null) {
+    const block = match[1];
+    const emails = block.match(emailRegex);
+    if (emails) {
+      ccList.push(...emails.map((e) => e.toLowerCase()));
+    }
+  }
+
   return {
-    to: Array.from(new Set(toList)),
-    cc: Array.from(new Set(ccList)),
+    to: Array.from(new Set(toList.map((e) => e.trim()))),
+    cc: Array.from(new Set(ccList.map((e) => e.trim()))),
   };
 }
 
@@ -1289,6 +1407,16 @@ export function convertGraphMailToHellmannOrder(
   const resolvedBodyText = bodyStr || payload?.bodyText || '';
   const resolvedAttachments = (g.attachments && g.attachments.length > 0) ? g.attachments : (payload?.attachments || []);
 
+  const embeddedRecips = extractRecipientsFromEmailContent(resolvedBodyText, resolvedBodyHtml);
+  const combinedTo = Array.from(new Set([...(g.toRecipients || []), ...embeddedRecips.to].filter(Boolean)));
+  const combinedCc = Array.from(
+    new Set(
+      [...(g.ccRecipients || []), ...embeddedRecips.cc].filter(
+        (c) => Boolean(c) && !combinedTo.map((t) => t.toLowerCase()).includes(c.toLowerCase())
+      )
+    )
+  );
+
   return {
     id: g.id,
     messageId: (g as any).messageId || g.id,
@@ -1297,8 +1425,8 @@ export function convertGraphMailToHellmannOrder(
     subject: g.subject || '(件名なし)',
     senderName: g.sender?.name || 'Hellmann 担当者',
     senderEmail: g.sender?.email || '',
-    toRecipients: g.toRecipients || [],
-    ccRecipients: g.ccRecipients || [],
+    toRecipients: combinedTo.length > 0 ? combinedTo : g.toRecipients || [],
+    ccRecipients: combinedCc.length > 0 ? combinedCc : g.ccRecipients || [],
     bodyText: resolvedBodyText,
     bodyHtml: resolvedBodyHtml,
     status,
@@ -2710,39 +2838,63 @@ export function saveCustomSentMail(mail: UnifiedMailItem): void {
 
 export function getGraphInboxMails(): UnifiedMailItem[] {
   if (typeof window === 'undefined') return [];
+  if (cachedGraphInboxMails && cachedGraphInboxMails.length > 0) {
+    return cachedGraphInboxMails;
+  }
   const raw = localStorage.getItem(GRAPH_INBOX_MAILS_KEY);
   if (!raw) return [];
   try {
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? list : [];
+    if (Array.isArray(list) && list.length > 0) {
+      cachedGraphInboxMails = list;
+      return list;
+    }
   } catch {
-    return [];
+    // fallback
   }
+  return [];
 }
 
 export function saveGraphInboxMails(mails: UnifiedMailItem[]): void {
   if (typeof window === 'undefined') return;
+  cachedGraphInboxMails = mails;
+  if (Array.isArray(mails) && mails.length > 0) {
+    markRealM365EmailsSynced();
+  }
   const sanitized = sanitizeUnifiedMailsForLocalStorage(mails);
   safeLocalStorageSetItem(GRAPH_INBOX_MAILS_KEY, JSON.stringify(sanitized));
+  saveGraphMailListToIndexedDB('inbox', mails).catch(() => {});
   notifyListeners();
 }
 
 export function getGraphSentMails(): UnifiedMailItem[] {
   if (typeof window === 'undefined') return [];
+  if (cachedGraphSentMails && cachedGraphSentMails.length > 0) {
+    return cachedGraphSentMails;
+  }
   const raw = localStorage.getItem(GRAPH_SENT_MAILS_KEY);
   if (!raw) return [];
   try {
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? list : [];
+    if (Array.isArray(list) && list.length > 0) {
+      cachedGraphSentMails = list;
+      return list;
+    }
   } catch {
-    return [];
+    // fallback
   }
+  return [];
 }
 
 export function saveGraphSentMails(mails: UnifiedMailItem[]): void {
   if (typeof window === 'undefined') return;
+  cachedGraphSentMails = mails;
+  if (Array.isArray(mails) && mails.length > 0) {
+    markRealM365EmailsSynced();
+  }
   const sanitized = sanitizeUnifiedMailsForLocalStorage(mails);
   safeLocalStorageSetItem(GRAPH_SENT_MAILS_KEY, JSON.stringify(sanitized));
+  saveGraphMailListToIndexedDB('sent', mails).catch(() => {});
   notifyListeners();
 }
 
@@ -2957,8 +3109,8 @@ export function getUnifiedMailMessages(): UnifiedMailItem[] {
     });
   }
 
-  // In production mode (when isDemoMode is false), we strictly exclude all demo/mock/simulated email placeholders
-  const isProductionWithGraph = !settings.isDemoMode;
+  // In production mode or when real Graph emails exist, we strictly exclude all demo/mock/simulated email placeholders
+  const isProductionWithGraph = !settings.isDemoMode || hasRealM365EmailsSynced() || graphInbox.length > 0;
 
   // 1. Hellmann Order Incoming Emails
   for (const o of hellmannOrders) {

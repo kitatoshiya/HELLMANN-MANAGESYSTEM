@@ -66,8 +66,8 @@ export const DocumentPreviewModal: React.FC<DocumentPreviewModalProps> = ({
   const isPdf = fileExt === 'pdf' || file?.contentType === 'application/pdf';
   const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(fileExt) || file?.contentType?.startsWith('image/');
 
-  const awbNumber = shipmentAwb || '057-59328813';
-  const consigneeName = consignee || 'BERGE SCAFELL PIKE';
+  const awbNumber = shipmentAwb || 'AWB';
+  const consigneeName = consignee || 'CONSIGNEE';
   const todayStr = new Date().toISOString().split('T')[0];
 
   // Generate fallback sample Excel data if file has no binary
