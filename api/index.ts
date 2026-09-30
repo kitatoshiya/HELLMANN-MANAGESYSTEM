@@ -53,6 +53,12 @@ async function getGraphAccessToken(tenantId: string, clientId: string, clientSec
   const data = (await resp.json()) as any;
   if (!resp.ok || !data.access_token) {
     const errDesc = data.error_description || data.error || 'Failed to obtain access token from Microsoft Entra ID';
+    if (errDesc.includes('AADSTS7000215')) {
+      throw new Error(`【シークレット設定エラー (AADSTS7000215)】入力されたクライアントシークレットが無効または「シークレット ID」になっています。\n\n【解決方法】:\n1. Entra IDの「証明書とシークレット」画面を開きます。\n2. 「シークレット ID」ではなく、作成されたシークレットの『値 (Value)』(例: abc~Xyz123...) をコピーして貼り付けてください。`);
+    }
+    if (errDesc.includes('AADSTS700016') || errDesc.includes('AADSTS90002')) {
+      throw new Error(`【テナント/クライアントIDエラー】指定されたテナントIDまたはクライアントIDが存在しないか間違っています。Entra IDの「概要」画面で再確認してください。`);
+    }
     throw new Error(`[M365 Auth Error] ${errDesc}`);
   }
 
@@ -377,25 +383,74 @@ function extractHeaderRecipientsFromText(content: string): { to: string[]; cc: s
   const ccList: string[] = [];
   if (!content) return { to: toList, cc: ccList };
 
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+  // 1. Line-by-line inspection with normalized newlines
   const plain = content
     .replace(/<br\s*[\/]?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/(?:p|div|tr|h\d)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
 
   const lines = plain.split(/\r?\n/);
+  let currentHeader: 'to' | 'cc' | null = null;
+
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (/^(?:To|宛先|送信先|To Recipients|宛先アドレス)[:：]/i.test(line)) {
-      toList.push(...extractEmailAddressesList(line));
-    } else if (/^(?:Cc|CC|カーボンコピー)[:：]/i.test(line)) {
-      ccList.push(...extractEmailAddressesList(line));
+    if (!line) {
+      currentHeader = null;
+      continue;
+    }
+
+    const isToHeader = /^(?:To|宛先|送信先|To\s*Recipients|宛先アドレス)\s*[:：]/i.test(line);
+    const isCcHeader = /^(?:Cc|CC|ＣＣ|カーボンコピー|写し|Cc\s*Recipients|CC\s*Recipients|CC宛先|Cc宛先|Carbon\s*Copy(?:\s*\([Cc]\))?)\s*[:：;]/i.test(line);
+    const isOtherHeader = /^(?:From|差出人|送信元|Subject|件名|Date|送信日時|受信日時|Sent|Received)\s*[:：]/i.test(line);
+
+    if (isToHeader) {
+      currentHeader = 'to';
+      const emails = line.match(emailRegex);
+      if (emails) toList.push(...emails.map((e) => e.toLowerCase()));
+    } else if (isCcHeader) {
+      currentHeader = 'cc';
+      const emails = line.match(emailRegex);
+      if (emails) ccList.push(...emails.map((e) => e.toLowerCase()));
+    } else if (isOtherHeader) {
+      currentHeader = null;
+    } else if (currentHeader) {
+      // Continuation line for multi-line recipient list (indented or wrapped)
+      const emails = line.match(emailRegex);
+      if (emails) {
+        if (currentHeader === 'to') toList.push(...emails.map((e) => e.toLowerCase()));
+        if (currentHeader === 'cc') ccList.push(...emails.map((e) => e.toLowerCase()));
+      } else if (!line.includes('@') && !line.includes(';') && !line.includes(',')) {
+        currentHeader = null;
+      }
+    }
+  }
+
+  // 2. Direct regex extraction from original raw content (HTML/plain) for any embedded Cc patterns
+  const rawCcRegex = /(?:^|[\r\n<>\/]|<b>|<strong>|<p>|<div>)(?:Cc|CC|ＣＣ|カーボンコピー|写し|CC宛先|Cc宛先|Carbon\s*Copy)(?:\s*(?:\([Cc]\))?)\s*[:：;]([^\r\n<>\/]*?(?:@[^\r\n<>]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = rawCcRegex.exec(content)) !== null) {
+    const chunk = match[1];
+    const emails = chunk.match(emailRegex);
+    if (emails) {
+      ccList.push(...emails.map((e) => e.toLowerCase()));
+    }
+  }
+
+  // 3. Look for Cc blocks ending before Subject/From/To/Date
+  const blockCcRegex = /(?:Cc|CC|ＣＣ|カーボンコピー|写し|CC宛先|Cc宛先)\s*[:：]\s*([\s\S]{1,500}?)(?=(?:\r?\n\s*(?:Subject|件名|From|差出人|To|宛先|Date|日時|本文|-----)|<div|<p|$))/gi;
+  while ((match = blockCcRegex.exec(content)) !== null) {
+    const block = match[1];
+    const emails = block.match(emailRegex);
+    if (emails) {
+      ccList.push(...emails.map((e) => e.toLowerCase()));
     }
   }
 
   return {
-    to: Array.from(new Set(toList)),
-    cc: Array.from(new Set(ccList)),
+    to: Array.from(new Set(toList.map((e) => e.trim()))),
+    cc: Array.from(new Set(ccList.map((e) => e.trim()))),
   };
 }
 
@@ -1350,6 +1405,14 @@ m365Router.post('/onedrive/test-connection', async (req, res) => {
         });
       }
 
+      if (errMsg.includes('General exception') || errJson.error?.code === 'generalException' || driveResp.status === 400 || driveResp.status === 403) {
+        const consentUrl = `https://login.microsoftonline.com/${encodeURIComponent(effTenantId)}/v2.0/adminconsent?client_id=${encodeURIComponent(effClientId)}&scope=https://graph.microsoft.com/.default`;
+        return res.status(driveResp.status).json({
+          success: false,
+          error: `【管理者同意（Admin Consent）が未完了です】\nEntra IDで『アプリケーションの許可 (Files.ReadWrite.All)』は追加されていますが、管理者の同意が付与されていません（状態欄が⚠️になっています）。\n\n【解決方法】:\n1. 社内M365管理者に以下のURLを開いてもらい『承諾』を押してもらうことで即座に連携が完了します:\n${consentUrl}\n\n2. なお、管理者の同意を待つ間も「クライアントシークレット」を空欄にするかシミュレーターモードに設定いただければ、本システムのOneDriveフォルダ自動作成およびメール添付保存機能はそのままテスト可能です。`,
+        });
+      }
+
       return res.status(driveResp.status).json({
         success: false,
         error: errMsg || `OneDriveドライブの取得に失敗しました (HTTP ${driveResp.status})`,
@@ -1833,7 +1896,7 @@ async function resolveOrCreateGoogleDriveFolderPath(
   const cleanDigits = rawAwb ? rawAwb.replace(/[^0-9]/g, '') : '';
   const last8Digits = cleanDigits.length >= 8 ? cleanDigits.slice(-8) : cleanDigits;
 
-  // 1. ALL-FOLDERS IN-MEMORY SEARCH (Most resilient against Drive indexing & naming quirks)
+  // 1. ALL-FOLDERS IN-MEMORY SEARCH (Strictly matches target shipment's AWB/digits)
   try {
     const listResp = await fetchWithTimeout(
       `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false")}&fields=files(id,name,parents,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=100`,
@@ -1845,17 +1908,14 @@ async function resolveOrCreateGoogleDriveFolderPath(
       const listData = (await listResp.json()) as any;
       const allFolders: Array<{ id: string; name: string; parents?: string[] }> = listData.files || [];
 
-      // A. Match directly by AWB (e.g. "PTY 057-59328813 MV BERGE...")
-      if (cleanDigits && cleanDigits.length >= 5) {
+      // A. Match directly by target AWB (e.g. "804-22772621" or "22772621")
+      if (cleanDigits && cleanDigits.length >= 6) {
         for (const f of allFolders) {
           const fClean = (f.name || '').replace(/[^0-9]/g, '');
-          const fNameLower = (f.name || '').toLowerCase();
           if (
             (rawAwb && f.name.includes(rawAwb)) ||
-            (last8Digits && fClean.includes(last8Digits)) ||
             (cleanDigits && fClean.includes(cleanDigits)) ||
-            fNameLower.includes('59328813') ||
-            fNameLower.includes('057-59328813')
+            (last8Digits && last8Digits.length >= 7 && fClean.includes(last8Digits))
           ) {
             console.log(`[Google Drive] Matched target folder in memory: "${f.name}" (${f.id})`);
             return { folderId: f.id, folderName: f.name, debugDetails: { method: 'in-memory-awb', matched: f.name } };
@@ -1868,7 +1928,7 @@ async function resolveOrCreateGoogleDriveFolderPath(
       if (dateSeg) {
         const dateFolder = allFolders.find((f) => f.name.includes(dateSeg));
         if (dateFolder) {
-          // Check child folders of this date folder
+          // Check child folders of this date folder for exact AWB match
           const childResp = await fetchWithTimeout(
             `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`'${dateFolder.id}' in parents and trashed = false`)}&fields=files(id,name,mimeType)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=50`,
             { headers: { Authorization: `Bearer ${token}` } },
@@ -1881,17 +1941,12 @@ async function resolveOrCreateGoogleDriveFolderPath(
               const chClean = (ch.name || '').replace(/[^0-9]/g, '');
               if (
                 ch.mimeType === 'application/vnd.google-apps.folder' &&
-                ((last8Digits && chClean.includes(last8Digits)) ||
-                 (rawAwb && ch.name.includes(rawAwb)) ||
-                 ch.name.toLowerCase().includes('59328813'))
+                ((rawAwb && ch.name.includes(rawAwb)) ||
+                 (cleanDigits && cleanDigits.length >= 6 && chClean.includes(cleanDigits)) ||
+                 (last8Digits && last8Digits.length >= 7 && chClean.includes(last8Digits)))
               ) {
                 return { folderId: ch.id, folderName: ch.name, debugDetails: { method: 'date-folder-child', matched: ch.name } };
               }
-            }
-            // If the date folder only has 1 subfolder, that subfolder is the shipment folder!
-            const subfolders = children.filter((c) => c.mimeType === 'application/vnd.google-apps.folder');
-            if (subfolders.length === 1) {
-              return { folderId: subfolders[0].id, folderName: subfolders[0].name, debugDetails: { method: 'date-folder-single-child', matched: subfolders[0].name } };
             }
           }
         }
@@ -2125,16 +2180,11 @@ async function resolveShipmentTargetFolder(
       for (const f of allFolders) {
         const fName = f.name || '';
         const fClean = fName.replace(/[^0-9]/g, '');
-        const fNameLower = fName.toLowerCase();
 
         const isMatch =
-          (cleanDigits && fClean.includes(cleanDigits)) ||
-          (last8 && fClean.includes(last8)) ||
-          (last7 && fClean.includes(last7)) ||
           (rawAwb && fName.includes(rawAwb)) ||
-          fNameLower.includes('59328813') ||
-          fNameLower.includes('057-59328813') ||
-          (fNameLower.includes('berge') && fNameLower.includes('scafell'));
+          (cleanDigits && cleanDigits.length >= 6 && fClean.includes(cleanDigits)) ||
+          (last8 && last8.length >= 7 && fClean.includes(last8));
 
         if (isMatch) {
           candidates.set(f.id, { id: f.id, name: fName, parents: f.parents });
@@ -2156,21 +2206,16 @@ async function resolveShipmentTargetFolder(
     return { id: list[0].id, name: list[0].name };
   }
 
-  // If multiple candidate folders matched (e.g. parent folder and inner shipment folder):
+  // If multiple candidate folders matched:
   // 1. Prefer candidate whose parent is another candidate (innermost child shipment folder)
   const candidateIds = new Set(list.map((c) => c.id));
   const childCandidates = list.filter((c) => c.parents && c.parents.some((p) => candidateIds.has(p)));
   if (childCandidates.length > 0) {
-    const ptyChild = childCandidates.find((c) => c.name.toUpperCase().startsWith('PTY'));
-    if (ptyChild) return { id: ptyChild.id, name: ptyChild.name };
+    childCandidates.sort((a, b) => b.name.length - a.name.length);
     return { id: childCandidates[0].id, name: childCandidates[0].name };
   }
 
-  // 2. Prefer candidate folder whose name explicitly starts with "PTY"
-  const ptyFolder = list.find((c) => c.name.toUpperCase().startsWith('PTY'));
-  if (ptyFolder) return { id: ptyFolder.id, name: ptyFolder.name };
-
-  // 3. Fallback to candidate with the longest name (most specific)
+  // 2. Fallback to candidate with the longest name (most specific)
   list.sort((a, b) => b.name.length - a.name.length);
   return { id: list[0].id, name: list[0].name };
 }
