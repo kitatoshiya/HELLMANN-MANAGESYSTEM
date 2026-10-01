@@ -1,6 +1,0 @@
-{
-  "name": "ACE船用品輸出 見積管理・共有ボード",
-  "description": "船用品航空輸送の見積依頼・手配進捗管理・Microsoft 365共通メール連携・未出荷在庫抽出アプリ",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
