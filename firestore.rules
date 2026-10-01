@@ -2,7 +2,84 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Default deny all
     match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Staff Members collection
+    match /staffMembers/{staffId} {
+      allow read, write: if true;
+    }
+
+    // Quotations collection
+    match /quotations/{quoteId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;
+
+      // Thread messages subcollection
+      match /messages/{messageId} {
+        allow read: if true;
+        allow create: if true;
+        allow update: if true;
+        allow delete: if true;
+      }
+    }
+
+    // Top-level Messages collection
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Sticky Notes collection (裏画面 付箋ボード)
+    match /sticky_notes/{noteId} {
+      allow read, write: if true;
+    }
+
+    // Settings collection (共通メールサーバー設定等)
+    match /settings/{settingId} {
+      allow read, write: if true;
+    }
+
+    // Emails collection (共通メールメッセージ)
+    match /emails/{emailId} {
+      allow read, write: if true;
+    }
+
+    // Chat messages collection (カンバン画面チャット)
+    match /chat_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Chat typing status collection
+    match /chat_typing/{email} {
+      allow read, write: if true;
+    }
+
+    // User Backgrounds collection
+    match /user_backgrounds/{email} {
+      allow read, write: if true;
+    }
+
+    // User Notification Preferences collection
+    match /user_notification_prefs/{email} {
+      allow read, write: if true;
+    }
+
+    // User Active Views collection
+    match /user_active_views/{email} {
+      allow read, write: if true;
+    }
+
+    // Suppliers Master collection (サプライヤーマスタ)
+    match /suppliers/{supplierId} {
+      allow read, write: if true;
+    }
+
+    // Email Inquiry Templates collection (サプライヤー問合せテンプレート)
+    match /email_templates/{templateId} {
       allow read, write: if true;
     }
   }

@@ -1,46 +1,192 @@
 {
-  "collections": [
-    {
-      "name": "shipments",
-      "fields": [
-        { "name": "mawbNumber", "type": "string" },
-        { "name": "hawbNumber", "type": "string", "optional": true },
-        { "name": "orderNumber", "type": "string" },
-        { "name": "shipper", "type": "string" },
-        { "name": "status", "type": "string" },
-        { "name": "createdAt", "type": "string" }
-      ],
-      "rules": {
-        "read": "true",
-        "create": "true",
-        "update": "true",
-        "delete": "true"
-      }
+  "entities": {
+    "StaffMember": {
+      "title": "Staff Member",
+      "description": "Company staff member master record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "maxLength": 100 },
+        "employeeNumber": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["name", "email"]
     },
-    {
-      "name": "logs",
-      "fields": [
-        { "name": "shipmentId", "type": "string" },
-        { "name": "timestamp", "type": "string" }
-      ],
-      "rules": {
-        "read": "true",
-        "create": "true",
-        "update": "true",
-        "delete": "true"
-      }
+    "Quotation": {
+      "title": "Quotation Request",
+      "description": "Marine spare parts air freight quote request",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 300 },
+        "vesselName": { "type": "string", "maxLength": 200 },
+        "airportCodes": { "type": "array" },
+        "grossWeight": { "type": "string", "maxLength": 100 },
+        "isUrgent": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["draft", "requested", "estimated", "re_estimating", "accepted", "closed_or_on_hold"] },
+        "createdBy": { "type": "string", "maxLength": 100 },
+        "assignedStaffId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastRepliedAt": { "type": "string", "format": "date-time" },
+        "readBy": { "type": "array" },
+        "externalLinks": { "type": "array" },
+        "quickMemo": { "type": "object" },
+        "arrangementMemo": { "type": "string", "maxLength": 5000 }
+      },
+      "required": ["title", "vesselName", "status", "createdBy"]
     },
-    {
-      "name": "pdfTemplates",
-      "fields": [
-        { "name": "name", "type": "string" }
-      ],
-      "rules": {
-        "read": "true",
-        "create": "true",
-        "update": "true",
-        "delete": "true"
-      }
+    "Message": {
+      "title": "Thread Message",
+      "description": "Individual message or system log in a quote thread",
+      "type": "object",
+      "properties": {
+        "quoteId": { "type": "string", "maxLength": 128 },
+        "authorEmail": { "type": "string", "maxLength": 100 },
+        "authorName": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "contentHtml": { "type": "string", "maxLength": 50000 },
+        "isSystemLog": { "type": "boolean" },
+        "externalLinks": { "type": "array" }
+      },
+      "required": ["quoteId", "authorEmail", "contentHtml"]
+    },
+    "StickyNote": {
+      "title": "Sticky Note",
+      "description": "Freeform sticky note on the backstage white board canvas",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "content": { "type": "string", "maxLength": 20000 },
+        "color": { "type": "string" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "links": { "type": "array" },
+        "imageUrl": { "type": "string" },
+        "createdBy": { "type": "string", "maxLength": 100 },
+        "createdByName": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "zIndex": { "type": "number" }
+      },
+      "required": ["title", "content", "createdBy"]
+    },
+    "EmailServerSettings": {
+      "title": "Email Server Settings",
+      "description": "Shared email server configuration for IMAP/POP3/SMTP",
+      "type": "object",
+      "properties": {
+        "commonEmail": { "type": "string", "maxLength": 100 },
+        "senderName": { "type": "string", "maxLength": 100 },
+        "incomingProtocol": { "type": "string" },
+        "incomingHost": { "type": "string" },
+        "incomingPort": { "type": "number" },
+        "incomingEncryption": { "type": "string" },
+        "outgoingHost": { "type": "string" },
+        "outgoingPort": { "type": "number" },
+        "outgoingEncryption": { "type": "string" },
+        "authUsername": { "type": "string" },
+        "authPassword": { "type": "string" },
+        "syncIntervalMinutes": { "type": "number" },
+        "signatureText": { "type": "string" }
+      },
+      "required": ["commonEmail", "incomingHost", "outgoingHost"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "General team chat message on the Kanban screen",
+      "type": "object",
+      "properties": {
+        "authorEmail": { "type": "string", "maxLength": 100 },
+        "authorName": { "type": "string", "maxLength": 100 },
+        "content": { "type": "string", "maxLength": 10000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "mentions": { "type": "array" },
+        "readBy": { "type": "array" }
+      },
+      "required": ["authorEmail", "content"]
+    },
+    "Supplier": {
+      "title": "Supplier Master",
+      "description": "Supplier contact and inquiry master record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 200 },
+        "code": { "type": "string", "maxLength": 50 },
+        "contacts": { "type": "array" },
+        "defaultCcEmails": { "type": "array" },
+        "defaultPattern": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 5000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "contacts"]
+    },
+    "SupplierInquiryTemplate": {
+      "title": "Supplier Inquiry Template",
+      "description": "Customizable inquiry email template for suppliers",
+      "type": "object",
+      "properties": {
+        "patternNumber": { "type": "number" },
+        "category": { "type": "string" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 500 },
+        "subjectTemplate": { "type": "string", "maxLength": 500 },
+        "bodyHtmlTemplate": { "type": "string", "maxLength": 50000 },
+        "isDefault": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patternNumber", "title", "subjectTemplate", "bodyHtmlTemplate"]
     }
-  ]
+  },
+  "firestore": {
+    "/staffMembers/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Collection of staff master members"
+    },
+    "/quotations/{quoteId}": {
+      "schema": { "$ref": "#/entities/Quotation" },
+      "description": "Collection of all marine spare parts air freight quote requests"
+    },
+    "/quotations/{quoteId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Subcollection of thread messages and logs for a specific quote"
+    },
+    "/sticky_notes/{noteId}": {
+      "schema": { "$ref": "#/entities/StickyNote" },
+      "description": "Collection of backstage freeform sticky notes shared across all users"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/EmailServerSettings" },
+      "description": "Global application configuration settings including email server details"
+    },
+    "/emails/{emailId}": {
+      "schema": { "type": "object" },
+      "description": "Collection of common inbox and sent email messages"
+    },
+    "/chat_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Collection of general chat messages on Kanban screen"
+    },
+    "/user_backgrounds/{email}": {
+      "schema": { "type": "object" },
+      "description": "Per-user background image or color settings"
+    },
+    "/user_notification_prefs/{email}": {
+      "schema": { "type": "object" },
+      "description": "Per-user desktop and email notification preferences"
+    },
+    "/user_active_views/{email}": {
+      "schema": { "type": "object" },
+      "description": "Per-user active screen mode state (kanban | sticky_board | email)"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Collection of supplier master records with up to 5 contacts"
+    },
+    "/email_templates/{templateId}": {
+      "schema": { "$ref": "#/entities/SupplierInquiryTemplate" },
+      "description": "Collection of customizable supplier inquiry email templates"
+    }
+  }
 }

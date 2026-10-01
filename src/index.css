@@ -1,1 +1,716 @@
 @import "tailwindcss";
+
+/* Excel & HTML Table Borders */
+table {
+  border-collapse: collapse !important;
+  width: 100%;
+}
+
+table, th, td {
+  border: 1px solid #94a3b8; /* slate-400 equivalent */
+}
+
+.dark table, .dark th, .dark td, .theme-dark table, .theme-dark th, .theme-dark td {
+  border-color: #475569;
+}
+
+.theme-cute table, .theme-cute th, .theme-cute td {
+  border-color: #f472b6;
+}
+
+.theme-digital table, .theme-digital th, .theme-digital td {
+  border-color: #059669;
+}
+
+th, td {
+  padding: 6px 12px;
+}
+
+th {
+  background-color: rgba(203, 213, 225, 0.4);
+  font-weight: 700;
+}
+
+.dark th, .theme-dark th {
+  background-color: rgba(30, 41, 59, 0.8);
+}
+
+.theme-cute th {
+  background-color: rgba(251, 207, 232, 0.6);
+  color: #831843;
+}
+
+.theme-digital th {
+  background-color: rgba(6, 78, 59, 0.8);
+  color: #34d399;
+}
+
+/* Theme Roots */
+/* Always dark blue background with white text theme selector dropdown regardless of mode */
+.theme-selector-box,
+.theme-selector-select,
+select.theme-selector-select,
+.theme-selector-select option {
+  background-color: #0f172a !important;
+  color: #ffffff !important;
+  color-scheme: dark !important;
+}
+
+/* Always white rich editor content area regardless of screen mode */
+.rich-editor-input,
+[contenteditable="true"].rich-editor-input,
+textarea.rich-editor-input {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+[contenteditable="true"].rich-editor-input:empty:before {
+  color: #64748b !important;
+}
+
+.rich-editor-input * {
+  color: #0f172a !important;
+}
+
+.rich-editor-input div,
+.rich-editor-input table,
+.rich-editor-input table td,
+.rich-editor-input table th {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+.rich-editor-input table tr.bg-slate-200,
+.rich-editor-input table th,
+.rich-editor-input table thead tr {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+.rich-editor-input table tr.bg-slate-50 {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+.theme-light {
+  color-scheme: light;
+  background-color: #f0fdf4 !important;
+  color: #0f172a !important;
+}
+
+.theme-light main {
+  background-color: #f0fdf4 !important;
+}
+
+/* Light mode ThreadDrawer message timeline */
+.theme-light .thread-messages-column {
+  background-color: #ffffff !important;
+}
+
+.theme-light .thread-messages-header {
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #0284c7 !important;
+}
+
+.theme-light .thread-messages-header span,
+.theme-light .thread-messages-header div {
+  color: #0284c7 !important;
+}
+
+.theme-light .thread-messages-list {
+  background-color: #ffffff !important;
+}
+
+.theme-light .thread-messages-list .bg-slate-800\/90,
+.theme-light .thread-messages-list .bg-slate-800 {
+  background-color: #f8fafc !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.theme-light .thread-messages-list .text-slate-100,
+.theme-light .thread-messages-list .text-slate-200,
+.theme-light .thread-messages-list .text-slate-300 {
+  color: #0f172a !important;
+}
+
+.theme-light .thread-messages-list .text-slate-400 {
+  color: #64748b !important;
+}
+
+/* Light mode Kanban columns background: very light green */
+.theme-light .kanban-column {
+  background-color: #e6f4ea !important;
+  border-color: #a7f3d0 !important;
+}
+
+.theme-light .kanban-column-requested {
+  background-color: #d1fae5 !important;
+  border-color: #6ee7b7 !important;
+}
+
+/* Light mode Kanban cards */
+.theme-light .kanban-card,
+.theme-light .kanban-card.bg-slate-900 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.08);
+}
+
+.theme-light .kanban-card.border-rose-500,
+.theme-light .kanban-card.border-rose-600 {
+  border-color: #f43f5e !important;
+  box-shadow: 0 0 0 2px #f43f5e, 0 4px 6px -1px rgba(244, 63, 94, 0.25) !important;
+}
+
+/* Light mode card title and customs date default & hover colors */
+.theme-light .kanban-card h3,
+.theme-light .kanban-card .kanban-customs-date,
+.theme-light .kanban-card .kanban-vessel-name {
+  color: #0f172a !important;
+}
+
+.theme-light .kanban-card:hover h3,
+.theme-light .kanban-card:hover .kanban-customs-date {
+  color: #1e40af !important; /* Dark blue on hover */
+}
+
+/* My accepted shipping task (red background card) in light mode */
+.theme-light .kanban-card.is-my-accepted-task {
+  background-color: transparent !important;
+  background-image: linear-gradient(to bottom right, #450a0a, #881337, #450a0a) !important;
+  border-color: #ef4444 !important;
+}
+
+.theme-light .kanban-card.is-my-accepted-task h3,
+.theme-light .kanban-card.is-my-accepted-task .kanban-customs-date,
+.theme-light .kanban-card.is-my-accepted-task:hover h3,
+.theme-light .kanban-card.is-my-accepted-task:hover .kanban-customs-date {
+  color: #ffffff !important;
+}
+
+.theme-light .kanban-card .text-slate-300,
+.theme-light .kanban-card .text-slate-400 {
+  color: #475569 !important;
+}
+
+.theme-light .kanban-card .text-sky-300 {
+  color: #0369a1 !important;
+}
+
+.theme-light .kanban-card .border-slate-800,
+.theme-light .kanban-card .border-slate-700 {
+  border-color: #e2e8f0 !important;
+}
+
+.theme-light .kanban-card select {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+.theme-light h2 {
+  color: #0f172a !important;
+}
+
+.theme-light h2.text-sky-300,
+.theme-light .text-sky-300 {
+  color: #0284c7 !important;
+}
+
+.theme-light .border-slate-800,
+.theme-light .border-slate-200\/80 {
+  border-color: #cbd5e1 !important;
+}
+
+.theme-dark {
+  color-scheme: dark;
+}
+
+.theme-cute {
+  --bg-primary: #fdf2f8;
+  --text-primary: #831843;
+}
+
+.theme-digital {
+  color-scheme: dark;
+  --bg-primary: #020c07;
+  --text-primary: #34d399;
+  background-color: #020c07 !important;
+  color: #34d399 !important;
+  font-family: "Courier New", Courier, "Cascadia Code", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+}
+
+.theme-digital *, 
+.theme-digital input, 
+.theme-digital select, 
+.theme-digital textarea, 
+.theme-digital button {
+  font-family: "Courier New", Courier, "Cascadia Code", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  letter-spacing: -0.01em;
+}
+
+/* Digital mode neon glow and terminal card borders */
+.theme-digital .border-slate-800,
+.theme-digital .border-slate-700,
+.theme-digital .border-slate-200 {
+  border-color: rgba(16, 185, 129, 0.35) !important;
+}
+
+.theme-digital .bg-slate-900,
+.theme-digital .bg-slate-950,
+.theme-digital .bg-white {
+  background-color: #04170e !important;
+}
+
+.theme-digital .bg-slate-800,
+.theme-digital .bg-slate-100 {
+  background-color: #062315 !important;
+}
+
+.theme-digital h1,
+.theme-digital h2,
+.theme-digital h3,
+.theme-digital h4 {
+  text-shadow: 0 0 8px rgba(52, 211, 153, 0.4);
+}
+
+/* Rich Editor contenteditable styling */
+[contenteditable="true"]:empty:before {
+  content: attr(placeholder);
+  color: #94a3b8;
+  pointer-events: none;
+  display: block;
+}
+
+@layer utilities {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+
+  /* Custom thin scrollbar */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.3);
+    border-radius: 9999px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.5);
+  }
+}
+
+/* ==========================================================
+   Shared Mailbox Light Mode Typography & Color Contrast Rules
+   Ensures text is never faint, gray, or white on light backgrounds
+   ========================================================== */
+.theme-light .shared-mail-wrapper {
+  color: #0f172a !important;
+  background-color: #f8fafc !important;
+}
+
+.theme-light .shared-mail-sidebar {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+}
+
+.theme-light .shared-mail-search-input {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+.theme-light .shared-mail-search-input::placeholder {
+  color: #64748b !important;
+}
+
+/* Mail List Item in Light Mode */
+.theme-light .shared-mail-item {
+  color: #0f172a !important;
+  border-bottom-color: #e2e8f0 !important;
+}
+
+.theme-light .shared-mail-item:hover {
+  background-color: #f1f5f9 !important;
+}
+
+.theme-light .shared-mail-item.is-selected {
+  background-color: #e0f2fe !important; /* sky-100 */
+}
+
+.theme-light .shared-mail-item .mail-sender {
+  color: #020617 !important; /* Deepest black */
+  font-weight: 700 !important;
+}
+
+.theme-light .shared-mail-item .mail-subject {
+  color: #0f172a !important;
+}
+
+.theme-light .shared-mail-item .mail-preview {
+  color: #334155 !important; /* Clearly readable slate-700 */
+}
+
+.theme-light .shared-mail-item .mail-date {
+  color: #475569 !important; /* Legible slate-600 */
+  font-weight: 500 !important;
+}
+
+/* Reading Pane Header in Light Mode */
+.theme-light .shared-mail-header {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+.theme-light .shared-mail-header .mail-header-subject {
+  color: #020617 !important;
+  font-weight: 800 !important;
+}
+
+.theme-light .shared-mail-header .mail-header-sender {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+.theme-light .shared-mail-header .mail-header-email {
+  color: #334155 !important;
+  font-weight: 600 !important;
+}
+
+.theme-light .shared-mail-header .mail-recipient-badge {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+  font-weight: 600 !important;
+}
+
+.theme-light .shared-mail-header .mail-header-date {
+  color: #334155 !important;
+  font-weight: 600 !important;
+}
+
+/* Reading Pane Mail Body Content in Light Mode */
+.theme-light .shared-mail-body-container {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* Overwrite Outlook/Word embedded text colors (e.g., color:windowtext, color:gray, or faint font tags) to solid black in light mode */
+.theme-light .shared-mail-body,
+.theme-light .shared-mail-body * {
+  color: #0f172a;
+}
+
+.theme-light .shared-mail-body p,
+.theme-light .shared-mail-body span,
+.theme-light .shared-mail-body div,
+.theme-light .shared-mail-body td,
+.theme-light .shared-mail-body th,
+.theme-light .shared-mail-body li,
+.theme-light .shared-mail-body font,
+.theme-light .shared-mail-body b,
+.theme-light .shared-mail-body strong {
+  color: #0f172a !important;
+}
+
+/* Preserve links */
+.theme-light .shared-mail-body a,
+.theme-light .shared-mail-body a *,
+.theme-light .shared-mail-body a span {
+  color: #0284c7 !important;
+  text-decoration: underline !important;
+}
+
+/* Ensure images fit cleanly in viewport and display with proper aspect ratio */
+.shared-mail-body img,
+.shared-mail-body-container img {
+  max-width: 100% !important;
+  height: auto !important;
+  display: block !important;
+  margin: 8px 0 !important;
+  border-radius: 4px;
+}
+
+/* Outlook-style folder tree sidebar styling */
+.theme-light .shared-mail-folders-pane {
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+}
+
+.theme-light .shared-mail-folder-item {
+  color: #0f172a !important;
+}
+
+.theme-light .shared-mail-folder-item:hover {
+  background-color: #e2e8f0 !important;
+}
+
+.theme-light .shared-mail-folder-item.is-selected {
+  background-color: #cbd5e1 !important;
+  color: #020617 !important;
+  font-weight: 700 !important;
+}
+
+/* Drag over folder visual hint */
+.drag-target-hover {
+  outline: 2px dashed #0284c7 !important;
+  outline-offset: -2px;
+  background-color: #e0f2fe !important;
+}
+
+/* ==========================================================
+   Light Mode Compose / Reply Modal Text Contrast Rules
+   ========================================================== */
+.theme-light .shared-mail-compose-modal {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+.theme-light .shared-mail-compose-modal input,
+.theme-light .shared-mail-compose-modal textarea {
+  background-color: #ffffff !important;
+  color: #020617 !important;
+  border-color: #cbd5e1 !important;
+}
+
+.theme-light .shared-mail-compose-modal input::placeholder,
+.theme-light .shared-mail-compose-modal textarea::placeholder {
+  color: #64748b !important;
+}
+
+/* ==========================================================
+   Rich Email Table, Image, and Quote Rendering Rules
+   ========================================================== */
+.rich-editor-input table,
+.quoted-original-mail table,
+.prose table {
+  border-collapse: collapse !important;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.rich-editor-input th,
+.rich-editor-input td,
+.quoted-original-mail th,
+.quoted-original-mail td,
+.prose th,
+.prose td {
+  border: 1px solid #cbd5e1 !important;
+  padding: 6px 10px !important;
+  font-size: 12px;
+  vertical-align: top;
+}
+
+.rich-editor-input th,
+.quoted-original-mail th,
+.prose th {
+  background-color: #f1f5f9 !important;
+  font-weight: 700 !important;
+  color: #0f172a !important;
+}
+
+.rich-editor-input img,
+.quoted-original-mail img,
+.prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  display: inline-block;
+  margin: 6px 0;
+}
+
+.quoted-original-mail {
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Non-Light Mode Email Body Table & Background Matching Rules (Dark, Kawaii/Cute, Digital) */
+.shared-mail-body-dark table,
+.shared-mail-body-dark table *,
+.shared-mail-body-dark tbody,
+.shared-mail-body-dark thead,
+.shared-mail-body-dark tfoot,
+.shared-mail-body-dark tr,
+.shared-mail-body-dark td,
+.shared-mail-body-dark th,
+.theme-dark .shared-mail-body table,
+.theme-dark .shared-mail-body table *,
+.theme-dark .shared-mail-body tbody,
+.theme-dark .shared-mail-body thead,
+.theme-dark .shared-mail-body tfoot,
+.theme-dark .shared-mail-body tr,
+.theme-dark .shared-mail-body td,
+.theme-dark .shared-mail-body th,
+.dark .shared-mail-body table,
+.dark .shared-mail-body table *,
+.dark .shared-mail-body tbody,
+.dark .shared-mail-body thead,
+.dark .shared-mail-body tfoot,
+.dark .shared-mail-body tr,
+.dark .shared-mail-body td,
+.dark .shared-mail-body th,
+.theme-cute .shared-mail-body table,
+.theme-cute .shared-mail-body table *,
+.theme-cute .shared-mail-body tbody,
+.theme-cute .shared-mail-body thead,
+.theme-cute .shared-mail-body tfoot,
+.theme-cute .shared-mail-body tr,
+.theme-cute .shared-mail-body td,
+.theme-cute .shared-mail-body th,
+.theme-digital .shared-mail-body table,
+.theme-digital .shared-mail-body table *,
+.theme-digital .shared-mail-body tbody,
+.theme-digital .shared-mail-body thead,
+.theme-digital .shared-mail-body tfoot,
+.theme-digital .shared-mail-body tr,
+.theme-digital .shared-mail-body td,
+.theme-digital .shared-mail-body th {
+  background-color: transparent !important;
+  background: transparent !important;
+}
+
+/* Clear white background colors inside non-light theme email bodies */
+.shared-mail-body-dark [style*="background"],
+.theme-dark .shared-mail-body [style*="background"],
+.dark .shared-mail-body [style*="background"],
+.theme-cute .shared-mail-body [style*="background"],
+.theme-digital .shared-mail-body [style*="background"],
+.shared-mail-body-dark [bgcolor],
+.theme-dark .shared-mail-body [bgcolor],
+.dark .shared-mail-body [bgcolor],
+.theme-cute .shared-mail-body [bgcolor],
+.theme-digital .shared-mail-body [bgcolor] {
+  background-color: transparent !important;
+  background: transparent !important;
+}
+
+/* Non-Light Mode Email Text Color Rules (White/Light Text for Dark, Kawaii/Cute, Digital Themes) */
+.shared-mail-body-dark,
+.shared-mail-body-dark *,
+.theme-dark .shared-mail-body,
+.theme-dark .shared-mail-body *,
+.dark .shared-mail-body,
+.dark .shared-mail-body *,
+.theme-cute .shared-mail-body,
+.theme-cute .shared-mail-body *,
+.theme-digital .shared-mail-body,
+.theme-digital .shared-mail-body * {
+  color: #f8fafc !important;
+}
+
+/* Links in non-light mode email body */
+.shared-mail-body-dark a,
+.shared-mail-body-dark a *,
+.theme-dark .shared-mail-body a,
+.theme-dark .shared-mail-body a *,
+.dark .shared-mail-body a,
+.dark .shared-mail-body a *,
+.theme-cute .shared-mail-body a,
+.theme-cute .shared-mail-body a *,
+.theme-digital .shared-mail-body a,
+.theme-digital .shared-mail-body a * {
+  color: #38bdf8 !important;
+  text-decoration: underline;
+}
+
+/* Email Quote Headers & Quote Lines */
+.shared-mail-body-dark blockquote,
+.theme-dark .shared-mail-body blockquote,
+.dark .shared-mail-body blockquote,
+.theme-cute .shared-mail-body blockquote,
+.theme-digital .shared-mail-body blockquote {
+  border-left-color: #38bdf8 !important;
+  background-color: transparent !important;
+  color: #e2e8f0 !important;
+}
+
+/* ==========================================================
+   Generated Email Preview Container (Always White Base & Black Text)
+   Regardless of Light, Dark, Cute, Digital screen modes
+   ========================================================== */
+.generated-email-preview,
+.generated-email-preview *,
+.generated-email-preview-header,
+.generated-email-preview-fields,
+.generated-email-preview-body,
+.generated-email-preview-body * {
+  color-scheme: light !important;
+}
+
+.generated-email-preview {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+.generated-email-preview-header {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+.generated-email-preview-fields {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+.generated-email-preview-fields span,
+.generated-email-preview-fields div {
+  color: #0f172a;
+}
+
+.generated-email-preview-fields .text-slate-600 {
+  color: #475569 !important;
+}
+
+.generated-email-preview-body {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+.generated-email-preview-body,
+.generated-email-preview-body div,
+.generated-email-preview-body p,
+.generated-email-preview-body span,
+.generated-email-preview-body strong,
+.generated-email-preview-body b,
+.generated-email-preview-body font,
+.generated-email-preview-body td,
+.generated-email-preview-body th,
+.generated-email-preview-body li,
+.generated-email-preview-body table {
+  background-color: #ffffff;
+  color: #0f172a !important;
+}
+
+.generated-email-preview-body th {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+.generated-email-preview-body table,
+.generated-email-preview-body td,
+.generated-email-preview-body th {
+  border-color: #cbd5e1 !important;
+}
+
+
+
+
