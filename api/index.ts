@@ -2975,11 +2975,11 @@ const INITIAL_BILLING_PRESETS = [
     name: '1. 標準航空輸出通関プラン',
     isDefault: true,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '取扱料 (Handling Fee)', amount: 5000 },
-      { taxable: false, name: '上屋使用料 (Terminal)', amount: 3200 },
-      { taxable: true, name: 'X線検査費用', amount: 2500 },
-      { taxable: false, name: 'トラック集荷料', amount: '' },
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '取扱料 (Handling Fee)', amount: 5000, note: '' },
+      { taxable: false, name: '上屋使用料 (Terminal)', amount: 3200, note: '' },
+      { taxable: true, name: 'X線検査費用', amount: 2500, note: '' },
+      { taxable: false, name: 'トラック集荷料', amount: '', note: '' },
     ],
     createdAt: '2026-01-01T00:00:00.000Z',
   },
@@ -2988,8 +2988,8 @@ const INITIAL_BILLING_PRESETS = [
     name: '2. 通関申告のみ',
     isDefault: false,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '書類点検作成料', amount: 3000 },
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '書類点検作成料', amount: 3000, note: '' },
     ],
     createdAt: '2026-01-01T00:01:00.000Z',
   },
@@ -2998,11 +2998,11 @@ const INITIAL_BILLING_PRESETS = [
     name: '3. 危険物・緊急出荷フルセット',
     isDefault: false,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '危険物点検梱包費', amount: 15000 },
-      { taxable: true, name: 'X線・爆発物検査費', amount: 3500 },
-      { taxable: true, name: 'アタッチ書類作成費', amount: 4000 },
-      { taxable: false, name: '時間外緊急対応費', amount: '' },
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '危険物点検梱包費', amount: 15000, note: '' },
+      { taxable: true, name: 'X線・爆発物検査費', amount: 3500, note: '' },
+      { taxable: true, name: 'アタッチ書類作成費', amount: 4000, note: '' },
+      { taxable: false, name: '時間外緊急対応費', amount: '', note: '' },
     ],
     createdAt: '2026-01-01T00:02:00.000Z',
   },
@@ -3070,7 +3070,7 @@ app.get('/api/billing-presets', (req, res) => {
 
 app.post('/api/billing-presets', (req, res) => {
   try {
-    const { name, items, isDefault } = req.body;
+    const { name, items, isDefault, comment } = req.body;
     if (!name || !Array.isArray(items)) {
       return res.status(400).json({ success: false, error: 'Name and items required' });
     }
@@ -3083,10 +3083,12 @@ app.post('/api/billing-presets', (req, res) => {
       id,
       name: String(name).trim().slice(0, 30),
       isDefault: shouldBeDefault,
+      comment: comment ? String(comment).split('\n').slice(0, 5).map((l: string) => l.slice(0, 20)).join('\n') : undefined,
       items: items.map((it: any) => ({
         taxable: Boolean(it.taxable),
         name: String(it.name || '').slice(0, 20),
         amount: it.amount === '' || it.amount === null ? '' : Number(it.amount),
+        note: String(it.note || '').slice(0, 10),
       })),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
