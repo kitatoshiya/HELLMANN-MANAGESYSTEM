@@ -309,6 +309,7 @@ export function initializeFirebaseStorage() {
           status: computedShipmentStatus,
           updatedAt: localItem.updatedAt || remoteItem.updatedAt || new Date().toISOString(),
           billingInitialized: localItem.billingInitialized || remoteItem.billingInitialized,
+          billingComment: localItem.billingComment !== undefined ? localItem.billingComment : remoteItem.billingComment,
           billingItems: (localItem.billingItems && localItem.billingItems.length > 0)
             ? localItem.billingItems
             : remoteItem.billingItems,
@@ -336,6 +337,9 @@ export function initializeFirebaseStorage() {
       if ((!remoteItem.billingItems || remoteItem.billingItems.length === 0) && (localItem.billingItems && localItem.billingItems.length > 0)) {
         remoteItem.billingItems = localItem.billingItems;
         remoteItem.billingInitialized = true;
+      }
+      if (remoteItem.billingComment === undefined && localItem.billingComment !== undefined) {
+        remoteItem.billingComment = localItem.billingComment;
       }
 
       return remoteItem;
@@ -636,14 +640,15 @@ export function sanitizeShipmentsForLocalStorage(shipments: Shipment[]): string 
  */
 export function computeShipmentFingerprint(s: Shipment): string {
   const billingSummary = s.billingItems
-    ? s.billingItems.map((b) => `${b.id}:${b.name}:${b.amount}:${b.taxable}`).join('|')
+    ? s.billingItems.map((b) => `${b.id}:${b.name}:${b.amount}:${b.taxable}:${b.note || ''}`).join('|')
     : '';
+  const commentSummary = s.billingComment || '';
   const tasksSummary = s.tasks
     ? s.tasks.map((t) => `${t.id}:${t.status}:${t.assignedTo?.uid || ''}`).join('|')
     : '';
   const milestoneSummary = s.milestones ? JSON.stringify(s.milestones) : '';
 
-  return `${s.id}#${s.updatedAt || ''}#${s.status}#${s.mawbNumber}#${s.hawbNumber || ''}#${s.assignedOperator?.id || ''}#${s.pieces || ''}#${s.grossWeight || ''}#${s.flightRoute || ''}#${s.customsClearanceDate || ''}#${s.cutTime || ''}#${s.shipper || ''}#${s.consignee || ''}#${s.billingInitialized ? '1' : '0'}#${billingSummary}#${tasksSummary}#${milestoneSummary}#${s.hasCustomPdf ? '1' : '0'}`;
+  return `${s.id}#${s.updatedAt || ''}#${s.status}#${s.mawbNumber}#${s.hawbNumber || ''}#${s.assignedOperator?.id || ''}#${s.pieces || ''}#${s.grossWeight || ''}#${s.flightRoute || ''}#${s.customsClearanceDate || ''}#${s.cutTime || ''}#${s.shipper || ''}#${s.consignee || ''}#${s.billingInitialized ? '1' : '0'}#${billingSummary}#${commentSummary}#${tasksSummary}#${milestoneSummary}#${s.hasCustomPdf ? '1' : '0'}`;
 }
 
 // Maps shipmentId -> timestamp (Date.now()) of the most recent local mutation

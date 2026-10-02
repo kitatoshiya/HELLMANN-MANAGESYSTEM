@@ -26,6 +26,7 @@ import {
   Layers,
   Calculator,
   Star,
+  MessageSquare,
 } from 'lucide-react';
 
 interface BillingOverlayEditorProps {
@@ -59,6 +60,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
         taxable: it.taxable,
         name: it.name,
         amount: '', // 初回表示・取り込み直後は金額をすべて空白にする
+        note: it.note || '',
       }));
     }
     return getDefaultBillingItems(true);
@@ -89,6 +91,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
     return '';
   });
 
+  const [comment, setComment] = useState<string>(() => shipment.billingComment || '');
   const [newPresetName, setNewPresetName] = useState<string>('');
   const [setAsDefaultOnSave, setSetAsDefaultOnSave] = useState<boolean>(false);
   const [showSavePresetModal, setShowSavePresetModal] = useState<boolean>(false);
@@ -97,6 +100,11 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
   const [presetToDelete, setPresetToDelete] = useState<{ id: string; name: string } | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+
+  // Sync comment with shipment when shipment changes
+  useEffect(() => {
+    setComment(shipment.billingComment || '');
+  }, [shipment.id, shipment.billingComment]);
 
   // 1st time initial setup: on first display, set items from default pattern in local state (no PDF reload/save triggered)
   useEffect(() => {
@@ -109,6 +117,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
           taxable: it.taxable,
           name: it.name,
           amount: '' as const, // 初回表示は金額をすべて空白にする
+          note: it.note || '',
         }));
         setSelectedPresetId(def.id);
         setItems(initialItems);
@@ -135,6 +144,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
                 taxable: it.taxable,
                 name: it.name,
                 amount: '', // 初回表示は金額をすべて空白にする
+                note: it.note || '',
               }));
             }
             return prevItems;
@@ -170,8 +180,9 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
   }, [shipment.id]);
 
   // Update local items state and matching preset ID, syncing immediately to shipment state
-  const updateLocalItems = (newItems: BillingItem[], newPresetId?: string) => {
+  const updateLocalItems = (newItems: BillingItem[], newPresetId?: string, newComment?: string) => {
     setItems(newItems);
+    const targetComment = newComment !== undefined ? newComment : comment;
     if (newPresetId !== undefined) {
       setSelectedPresetId(newPresetId);
     } else {
@@ -185,8 +196,20 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
       setSelectedPresetId(matched ? matched.id : '');
     }
 
-    // 画面で設定した明細情報を即座にストレージと上位コンポーネントに反映
-    const updated = updateShipmentBillingItems(shipment.id, newItems, false);
+    // 画面で設定した明細情報・コメントを即座にストレージと上位コンポーネントに反映
+    const updated = updateShipmentBillingItems(shipment.id, newItems, false, targetComment);
+    if (updated && onShipmentUpdated) {
+      onShipmentUpdated(updated);
+    }
+  };
+
+  // Handle multi-line comment change (Max 5 lines, max 20 chars per line)
+  const handleCommentChange = (raw: string) => {
+    const rawLines = raw.split('\n');
+    const truncatedLines = rawLines.slice(0, 5).map((l) => l.slice(0, 20));
+    const formatted = truncatedLines.join('\n');
+    setComment(formatted);
+    const updated = updateShipmentBillingItems(shipment.id, items, false, formatted);
     if (updated && onShipmentUpdated) {
       onShipmentUpdated(updated);
     }
@@ -246,6 +269,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
             taxable: true,
             name: calcName,
             amount: amount,
+            note: '',
           });
         }
       }
@@ -268,6 +292,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
       taxable: true,
       name: '',
       amount: '', // 未入力（空欄）
+      note: '', // 備考（空欄）
     };
     const updated = [...items, newItem];
     updateLocalItems(updated);
@@ -298,6 +323,8 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
         const numVal = Number(value);
         target.amount = isNaN(numVal) ? '' : numVal;
       }
+    } else if (field === 'note') {
+      target.note = String(value || '').slice(0, 10); // 最大10文字
     }
 
     updated[index] = target;
@@ -316,8 +343,13 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
         taxable: it.taxable,
         name: it.name,
         amount: it.amount,
+        note: it.note || '',
       }));
-      updateLocalItems(newItems, presetId);
+      const newComment = found.comment !== undefined ? found.comment : comment;
+      if (found.comment !== undefined) {
+        setComment(found.comment);
+      }
+      updateLocalItems(newItems, presetId, newComment);
     }
   };
 
@@ -344,7 +376,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
       return;
     }
 
-    const updatedPresets = await saveBillingPresetPattern(newPresetName, items, setAsDefaultOnSave);
+    const updatedPresets = await saveBillingPresetPattern(newPresetName, items, setAsDefaultOnSave, comment);
     setPresets(updatedPresets);
     const savedPreset = updatedPresets.find((p) => p.name === newPresetName.trim());
     if (savedPreset) {
@@ -382,7 +414,7 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
   // Save to Shipment (Explicit User Action with Confirmation & Activity Log)
   const handleSaveToShipment = () => {
     setIsSaving(true);
-    const updatedShipment = updateShipmentBillingItems(shipment.id, items, true);
+    const updatedShipment = updateShipmentBillingItems(shipment.id, items, true, comment);
     if (updatedShipment) {
       onShipmentUpdated(updatedShipment);
       setIsSavedSuccessfully(true);
@@ -591,33 +623,46 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
               <input
                 type="text"
                 maxLength={20}
-                placeholder="請求項目名 (20文字以内)"
+                placeholder="請求項目名 (20字以内)"
                 value={item.name}
                 onChange={(e) => handleItemChange(idx, 'name', e.target.value)}
-                style={{ width: '40%', maxWidth: '40%' }}
-                className="shrink-0 bg-slate-900 border border-slate-700 rounded-md px-2 py-0.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="flex-1 min-w-[90px] max-w-[170px] bg-slate-900 border border-slate-700 rounded-md px-2 py-0.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
 
               {/* Amount (Number or empty) - ￥マークは表示しない */}
-              <div className="relative w-28 shrink-0">
+              <div className="relative w-20 shrink-0">
                 <input
                   type="number"
-                  placeholder="未入力(空欄)"
+                  placeholder="未入力"
                   value={item.amount === '' || item.amount === null || item.amount === undefined ? '' : item.amount}
                   onChange={(e) => handleItemChange(idx, 'amount', e.target.value)}
-                  className={`w-full px-2 py-0.5 bg-slate-900 border rounded-md text-xs font-mono text-right focus:outline-none focus:ring-1 focus:ring-blue-500 ${
+                  className={`w-full px-1.5 py-0.5 bg-slate-900 border rounded-md text-xs font-mono text-right focus:outline-none focus:ring-1 focus:ring-blue-500 ${
                     item.amount === '' || item.amount === null
                       ? 'border-amber-500/50 text-amber-300 placeholder-amber-500/60'
                       : 'border-slate-700 text-slate-100'
                   }`}
+                  title="金額 (半角数字)"
                 />
               </div>
 
-              {/* Delete Button */}
+              {/* Note / 備考 (Max 10 chars) - 金額の右横 */}
+              <div className="relative w-24 shrink-0">
+                <input
+                  type="text"
+                  maxLength={10}
+                  placeholder="備考 (10字)"
+                  value={item.note || ''}
+                  onChange={(e) => handleItemChange(idx, 'note', e.target.value)}
+                  className="w-full px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded-md text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  title="備考テキスト（最大10文字、PDF上の金額右横33pxに印字）"
+                />
+              </div>
+
+              {/* Delete Button - 備考の右横に配置 */}
               <button
                 type="button"
                 onClick={() => handleDeleteRow(idx)}
-                className="p-1 text-slate-400 hover:text-rose-400 hover:bg-slate-700/60 rounded transition-colors cursor-pointer"
+                className="p-1 text-slate-400 hover:text-rose-400 hover:bg-slate-700/60 rounded transition-colors cursor-pointer shrink-0"
                 title="この行を削除"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -627,71 +672,28 @@ export const BillingOverlayEditor: React.FC<BillingOverlayEditorProps> = ({
         </div>
       </div>
 
-      {/* TAX & TTL Auto Calculation Display Box */}
-      <div
-        className={`p-3.5 rounded-xl border text-xs space-y-2 transition-all ${
-          calcResult.isCalculated
-            ? 'bg-slate-800/90 border-slate-700'
-            : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-        }`}
-      >
+      {/* コメント入力ボックス (5行×20文字、明細1行目の11行分上に印字) */}
+      <div className="bg-slate-800/90 border border-slate-700 p-3.5 rounded-xl text-xs space-y-2.5">
         <div className="flex items-center justify-between">
-          <span className="font-bold flex items-center gap-1.5">
-            <Info className="w-4 h-4 text-blue-400" />
-            TAX (消費税) & TTL (合計) 計算状態:
-          </span>
-
-          <span
-            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-              calcResult.isCalculated
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-            }`}
-          >
-            {calcResult.isCalculated ? '全金額入力済み (自動計算完了)' : '未入力項目あり (手書き用空欄)'}
+          <div className="flex items-center space-x-1.5 font-bold text-slate-200">
+            <MessageSquare className="w-4 h-4 text-blue-400 shrink-0" />
+            <span>コメント</span>
+            <span className="text-[10px] text-slate-400 font-normal">
+              (明細1行目の11行分上に最大5行印字)
+            </span>
+          </div>
+          <span className="text-[10px] text-slate-400 font-mono">
+            {comment ? comment.split('\n').length : 0}/5 行 (各行20文字以内)
           </span>
         </div>
 
-        {calcResult.isCalculated ? (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-xs">
-            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-700">
-              <div className="text-[10px] text-slate-400">課税対象小計:</div>
-              <div className="font-bold text-slate-200">
-                ¥{(calcResult.taxableSubtotal || 0).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-700">
-              <div className="text-[10px] text-slate-400">税抜合計:</div>
-              <div className="font-bold text-slate-200">
-                ¥{(calcResult.totalSubtotal || 0).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-slate-900/80 p-2 rounded-lg border border-amber-500/40">
-              <div className="text-[10px] text-amber-400 font-bold">TAX (10%):</div>
-              <div className="font-bold text-amber-300 text-sm">
-                ¥{(calcResult.tax || 0).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-blue-950/80 p-2 rounded-lg border border-blue-500/40">
-              <div className="text-[10px] text-blue-300 font-bold">TTL (総合計):</div>
-              <div className="font-bold text-blue-200 text-sm">
-                ¥{(calcResult.ttl || 0).toLocaleString()}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-1 pt-1 text-[11px] text-amber-200/90 leading-relaxed">
-            <div className="flex items-start space-x-1.5 font-bold">
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <span>
-                金額が未入力（空欄）の明細項目があるため、TAXおよびTTLの自動計算を停止し、印字欄を「手書き用スペース（空欄）」として表示します。
-              </span>
-            </div>
-            <div className="pl-5 text-[10px] text-slate-400">
-              ※翌日確定費用等に対応します。「0円」を入力した場合は入力済みとして計算されます。
-            </div>
-          </div>
-        )}
+        <textarea
+          rows={5}
+          value={comment}
+          onChange={(e) => handleCommentChange(e.target.value)}
+          placeholder="コメントを入力（最大5行・各行20文字以内）&#10;※明細項目リスト1行目から上に11行分の位置に印字されます"
+          className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-100 placeholder-slate-500 font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+        />
       </div>
 
       {/* Modal for saving new pattern preset */}

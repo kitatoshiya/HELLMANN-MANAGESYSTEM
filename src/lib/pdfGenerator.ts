@@ -52,8 +52,9 @@ function getOverlayCacheKey(shipment: Partial<Shipment>, options?: { forceRefres
   }
   const taskIdStatus = (shipment.tasks || []).map((t) => `${t.id}:${t.status}:${t.shortName || ''}`).join('|');
   const billingChecksum = (shipment.billingItems || [])
-    .map((b) => `${b.taxable ? '1' : '0'}:${b.name}:${b.amount}`)
+    .map((b) => `${b.taxable ? '1' : '0'}:${b.name}:${b.amount}:${b.note || ''}`)
     .join('|');
+  const commentChecksum = (shipment.billingComment || '').replace(/\s+/g, '_');
   const baseKey = shipment.id || shipment.hawbNumber || shipment.mawbNumber || 'unknown';
   const pdfLength = (shipment.originalPdfUrl || shipment.pdfDataUrl || '').length;
   const notes = options?.notes || (shipment.id ? getShipmentNotesSync(shipment.id) : []);
@@ -63,7 +64,7 @@ function getOverlayCacheKey(shipment: Partial<Shipment>, options?: { forceRefres
         `${n.id}:${n.pageNumber}:${n.type}:${n.x}:${n.y}:${n.width}:${n.height}:${n.color}:${n.textColor || ''}:${n.bgColor || ''}:${n.borderColor || ''}:${n.fillColor || ''}:${n.fillOpacity || ''}:${n.lineWidth || ''}:${n.fontSize || ''}:${n.text || ''}:${n.points?.length || 0}`
     )
     .join('||');
-  return `v3_res4_${baseKey}_${pdfLength}_${taskIdStatus}_${billingChecksum}_${notesChecksum}`;
+  return `v3_res4_${baseKey}_${pdfLength}_${taskIdStatus}_${billingChecksum}_${commentChecksum}_${notesChecksum}`;
 }
 
 export interface GenerateOverlayOptions {
@@ -602,19 +603,26 @@ function drawBillingOverlayOnCanvas(
   scale: number
 ) {
   let billingItems = shipment.billingItems;
-  if (!billingItems && shipment.id) {
+  let billingComment = shipment.billingComment;
+  if ((!billingItems || billingComment === undefined) && shipment.id) {
     const full = getShipments().find((s) => s.id === shipment.id);
-    if (full?.billingItems) {
+    if (!billingItems && full?.billingItems) {
       billingItems = full.billingItems;
+    }
+    if (billingComment === undefined && full?.billingComment) {
+      billingComment = full.billingComment;
     }
   }
 
-  // 請求明細が設定されていない、または空配列の場合はオーバーレイを描画しない
-  if (!billingItems || billingItems.length === 0) {
+  const hasItems = billingItems && billingItems.length > 0;
+  const hasComment = Boolean(billingComment && billingComment.trim());
+
+  // 請求明細もコメントも設定されていない場合はオーバーレイを描画しない
+  if (!hasItems && !hasComment) {
     return;
   }
 
-  const calc = calculateBillingTotals(billingItems);
+  const calc = calculateBillingTotals(billingItems || []);
 
   ctx.save();
 
@@ -631,65 +639,98 @@ function drawBillingOverlayOnCanvas(
 
   ctx.textBaseline = 'top';
 
+  // --- コメント描画（明細項目1行目の位置から上に11行分の位置に最大5行反映） ---
+  if (billingComment && billingComment.trim()) {
+    const commentLines = billingComment
+      .split('\n')
+      .slice(0, 5)
+      .map((l) => l.slice(0, 20));
+
+    const commentStartY = overlayY - 11 * rowHeight;
+
+    ctx.fillStyle = '#0f172a'; // slate-900
+    ctx.font = `bold ${fontRowSize}px sans-serif`;
+    ctx.textAlign = 'left';
+
+    for (let i = 0; i < commentLines.length; i++) {
+      const lineText = commentLines[i];
+      if (lineText && lineText.trim()) {
+        const lineY = commentStartY + i * rowHeight;
+        ctx.fillText(lineText, overlayX + 18 * scale, lineY);
+      }
+    }
+  }
+
   // 画面の明細項目リストを完全透過背景で印字
-  for (let index = 0; index < billingItems.length; index++) {
-    const item = billingItems[index];
-    if (!item) continue;
-    const itemY = overlayY + index * rowHeight;
+  if (billingItems && billingItems.length > 0) {
+    for (let index = 0; index < billingItems.length; index++) {
+      const item = billingItems[index];
+      if (!item) continue;
+      const itemY = overlayY + index * rowHeight;
 
-    // (a) 課税フラグ 'T' (課税対象時)
-    if (item.taxable) {
-      ctx.fillStyle = '#d97706'; // amber-600
-      ctx.font = `bold ${fontRowSize}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.fillText('T', overlayX + 8 * scale, itemY);
+      // (a) 課税フラグ 'T' (課税対象時)
+      if (item.taxable) {
+        ctx.fillStyle = '#d97706'; // amber-600
+        ctx.font = `bold ${fontRowSize}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('T', overlayX + 8 * scale, itemY);
+      }
+
+      // (b) 請求項目名 (最大20文字)
+      if (item.name && item.name.trim()) {
+        ctx.fillStyle = '#0f172a'; // slate-900
+        ctx.font = `bold ${fontRowSize}px sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.fillText(item.name, overlayX + 18 * scale, itemY);
+      }
+
+      // (c) 請求金額 PP (数値または空欄)
+      const amountX = overlayX + overlayWidth - 90 * scale;
+      const hasAmount = item.amount !== '' && item.amount !== null && item.amount !== undefined;
+      if (hasAmount) {
+        const num = Number(item.amount);
+        ctx.fillStyle = '#0f172a';
+        ctx.font = `bold ${fontRowSize}px monospace`;
+        ctx.textAlign = 'right';
+        ctx.fillText(`${num.toLocaleString()}`, amountX, itemY);
+      }
+
+      // (d) 備考テキスト (最大10文字) - 金額情報の右横に33px離して配置
+      if (item.note && item.note.trim()) {
+        ctx.fillStyle = '#0f172a'; // slate-900
+        ctx.font = `bold ${fontRowSize}px sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.fillText(item.note.trim().slice(0, 10), amountX + 33 * scale, itemY);
+      }
     }
 
-    // (b) 請求項目名 (最大20文字)
-    if (item.name && item.name.trim()) {
-      ctx.fillStyle = '#0f172a'; // slate-900
-      ctx.font = `bold ${fontRowSize}px sans-serif`;
-      ctx.textAlign = 'left';
-      ctx.fillText(item.name, overlayX + 18 * scale, itemY);
-    }
+    // --- 3. TAX (15行目に固定配置: overlayY + 14 * rowHeight) ---
+    const taxY = overlayY + 14 * rowHeight;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#475569';
+    ctx.font = `bold ${fontRowSize}px sans-serif`;
+    ctx.fillText('TAX (10%):', overlayX + 18 * scale, taxY);
 
-    // (c) 請求金額 PP (数値または空欄)
-    const hasAmount = item.amount !== '' && item.amount !== null && item.amount !== undefined;
-    if (hasAmount) {
-      const num = Number(item.amount);
-      ctx.fillStyle = '#0f172a';
+    ctx.textAlign = 'right';
+    if (calc.isCalculated && calc.tax !== null) {
+      ctx.fillStyle = '#d97706';
       ctx.font = `bold ${fontRowSize}px monospace`;
-      ctx.textAlign = 'right';
-      ctx.fillText(`${num.toLocaleString()}`, overlayX + overlayWidth - 90 * scale, itemY);
+      ctx.fillText(`${calc.tax.toLocaleString()}`, overlayX + overlayWidth - 90 * scale, taxY);
     }
-  }
 
-  // --- 3. TAX (15行目に固定配置: overlayY + 14 * rowHeight) ---
-  const taxY = overlayY + 14 * rowHeight;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#475569';
-  ctx.font = `bold ${fontRowSize}px sans-serif`;
-  ctx.fillText('TAX (10%):', overlayX + 18 * scale, taxY);
+    // --- 4. TTL (16行目に固定配置: overlayY + 15 * rowHeight) ---
+    const ttlY = overlayY + 15 * rowHeight;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#1e3a8a'; // blue-900
+    ctx.font = `bold ${fontRowSize + 0.5}px sans-serif`;
+    ctx.fillText('TTL (合計):', overlayX + 18 * scale, ttlY);
 
-  ctx.textAlign = 'right';
-  if (calc.isCalculated && calc.tax !== null) {
-    ctx.fillStyle = '#d97706';
-    ctx.font = `bold ${fontRowSize}px monospace`;
-    ctx.fillText(`${calc.tax.toLocaleString()}`, overlayX + overlayWidth - 90 * scale, taxY);
-  }
-
-  // --- 4. TTL (16行目に固定配置: overlayY + 15 * rowHeight) ---
-  const ttlY = overlayY + 15 * rowHeight;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#1e3a8a'; // blue-900
-  ctx.font = `bold ${fontRowSize + 0.5}px sans-serif`;
-  ctx.fillText('TTL (合計):', overlayX + 18 * scale, ttlY);
-
-  ctx.textAlign = 'right';
-  if (calc.isCalculated && calc.ttl !== null) {
-    ctx.fillStyle = '#1e3a8a';
-    ctx.font = `bold ${fontRowSize + 1}px monospace`;
-    ctx.fillText(`${calc.ttl.toLocaleString()}`, overlayX + overlayWidth - 90 * scale, ttlY);
+    ctx.textAlign = 'right';
+    if (calc.isCalculated && calc.ttl !== null) {
+      ctx.fillStyle = '#1e3a8a';
+      ctx.font = `bold ${fontRowSize + 1}px monospace`;
+      ctx.fillText(`${calc.ttl.toLocaleString()}`, overlayX + overlayWidth - 90 * scale, ttlY);
+    }
   }
 
   ctx.restore();

@@ -13,11 +13,11 @@ export const DEFAULT_BILLING_PRESETS: BillingPresetPattern[] = [
     name: '1. 標準航空輸出通関プラン',
     isDefault: true,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '取扱料 (Handling Fee)', amount: 5000 },
-      { taxable: false, name: '上屋使用料 (Terminal)', amount: 3200 },
-      { taxable: true, name: 'X線検査費用', amount: 2500 },
-      { taxable: false, name: 'トラック集荷料', amount: '' }, // 翌日確定 (空欄)
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '取扱料 (Handling Fee)', amount: 5000, note: '' },
+      { taxable: false, name: '上屋使用料 (Terminal)', amount: 3200, note: '' },
+      { taxable: true, name: 'X線検査費用', amount: 2500, note: '' },
+      { taxable: false, name: 'トラック集荷料', amount: '', note: '' }, // 翌日確定 (空欄)
     ],
     createdAt: '2026-01-01T00:00:00.000Z',
   },
@@ -26,8 +26,8 @@ export const DEFAULT_BILLING_PRESETS: BillingPresetPattern[] = [
     name: '2. 通関申告のみ',
     isDefault: false,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '書類点検作成料', amount: 3000 },
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '書類点検作成料', amount: 3000, note: '' },
     ],
     createdAt: '2026-01-01T00:01:00.000Z',
   },
@@ -36,11 +36,11 @@ export const DEFAULT_BILLING_PRESETS: BillingPresetPattern[] = [
     name: '3. 危険物・緊急出荷フルセット',
     isDefault: false,
     items: [
-      { taxable: true, name: '輸出通関料', amount: 11800 },
-      { taxable: true, name: '危険物点検梱包費', amount: 15000 },
-      { taxable: true, name: 'X線・爆発物検査費', amount: 3500 },
-      { taxable: true, name: 'アタッチ書類作成費', amount: 4000 },
-      { taxable: false, name: '時間外緊急対応費', amount: '' }, // 空欄
+      { taxable: true, name: '輸出通関料', amount: 11800, note: '' },
+      { taxable: true, name: '危険物点検梱包費', amount: 15000, note: '' },
+      { taxable: true, name: 'X線・爆発物検査費', amount: 3500, note: '' },
+      { taxable: true, name: 'アタッチ書類作成費', amount: 4000, note: '' },
+      { taxable: false, name: '時間外緊急対応費', amount: '', note: '' }, // 空欄
     ],
     createdAt: '2026-01-01T00:02:00.000Z',
   },
@@ -48,11 +48,11 @@ export const DEFAULT_BILLING_PRESETS: BillingPresetPattern[] = [
 
 // Default initial billing items if a shipment doesn't have any (Amounts are blank by default for first-time display)
 export const DEFAULT_INITIAL_BILLING_ITEMS: BillingItem[] = [
-  { id: 'item_1', taxable: true, name: '輸出通関料', amount: '' },
-  { id: 'item_2', taxable: true, name: '取扱料 (Handling)', amount: '' },
-  { id: 'item_3', taxable: false, name: '上屋保管使用料', amount: '' },
-  { id: 'item_4', taxable: true, name: 'X線検査作業料', amount: '' },
-  { id: 'item_5', taxable: false, name: '時間外配送手配費', amount: '' },
+  { id: 'item_1', taxable: true, name: '輸出通関料', amount: '', note: '' },
+  { id: 'item_2', taxable: true, name: '取扱料 (Handling)', amount: '', note: '' },
+  { id: 'item_3', taxable: false, name: '上屋保管使用料', amount: '', note: '' },
+  { id: 'item_4', taxable: true, name: 'X線検査作業料', amount: '', note: '' },
+  { id: 'item_5', taxable: false, name: '時間外配送手配費', amount: '', note: '' },
 ];
 
 /**
@@ -113,6 +113,7 @@ export function getDefaultBillingItems(blankAmounts: boolean = true): BillingIte
       taxable: it.taxable,
       name: it.name,
       amount: blankAmounts ? '' : it.amount,
+      note: it.note || '',
     }));
   }
   return DEFAULT_INITIAL_BILLING_ITEMS;
@@ -335,8 +336,9 @@ export async function fetchBillingPresets(): Promise<BillingPresetPattern[]> {
  */
 export async function saveBillingPresetPattern(
   name: string,
-  items: Array<{ taxable: boolean; name: string; amount: number | null | '' }>,
-  setAsDefault: boolean = false
+  items: Array<{ taxable: boolean; name: string; amount: number | null | ''; note?: string }>,
+  setAsDefault: boolean = false,
+  comment?: string
 ): Promise<BillingPresetPattern[]> {
   const existing = getLocalPresets();
   const id = `preset_${Date.now()}`;
@@ -345,10 +347,12 @@ export async function saveBillingPresetPattern(
     id,
     name: name.trim().slice(0, 30),
     isDefault: setAsDefault,
+    comment: comment ? comment.split('\n').slice(0, 5).map((l) => l.slice(0, 20)).join('\n') : undefined,
     items: items.map((it) => ({
       taxable: Boolean(it.taxable),
       name: (it.name || '').slice(0, 20),
       amount: it.amount === '' || it.amount === null ? '' : Number(it.amount),
+      note: (it.note || '').slice(0, 10),
     })),
     createdAt: now,
     updatedAt: now,
@@ -465,7 +469,8 @@ export async function deleteBillingPresetPattern(presetId: string): Promise<Bill
 export function updateShipmentBillingItems(
   shipmentId: string,
   billingItems: BillingItem[],
-  recordLog: boolean = true
+  recordLog: boolean = true,
+  billingComment?: string
 ): Shipment | undefined {
   const shipments = getShipments();
   const shipment = shipments.find((s) => s.id === shipmentId);
@@ -487,10 +492,15 @@ export function updateShipmentBillingItems(
       taxable: !!it.taxable,
       name: (it.name || '').slice(0, 20),
       amount: amt,
+      note: (it.note || '').slice(0, 10),
     };
   });
 
   shipment.billingItems = validItems;
+  if (billingComment !== undefined) {
+    const lines = (billingComment || '').split('\n').slice(0, 5).map((l) => l.slice(0, 20));
+    shipment.billingComment = lines.join('\n');
+  }
   shipment.billingInitialized = true;
   shipment.updatedAt = new Date().toISOString();
 

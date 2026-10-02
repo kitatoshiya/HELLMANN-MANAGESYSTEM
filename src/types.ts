@@ -93,6 +93,7 @@ export interface Shipment {
   tasks: Task[];
   comments?: ShipmentComment[];
   billingItems?: BillingItem[];
+  billingComment?: string; // 請求明細コメント (最大5行・各行20文字、PDF上で明細1行目の11行分上に印字)
   billingInitialized?: boolean; // 請求明細オーバーレイの初回表示・初期化済みフラグ
   milestones?: MilestoneState[];
   customsQas?: CustomsQaItem[]; // 通関士との質疑 ＆ ヘルマン社照会リレースレッド
@@ -320,16 +321,19 @@ export interface BillingItem {
   taxable: boolean; // 課税フラグ (ON時「T」出力)
   name: string; // 請求項目名 (20文字まで)
   amount: number | null | ''; // 金額 (0は入力済み、nullまたは''は未入力・空欄)
+  note?: string; // 備考テキスト (最大10文字、PDF上で金額の右横33pxに印字)
 }
 
 export interface BillingPresetPattern {
   id: string;
   name: string; // パターン名称 (最大20文字程度)
   isDefault?: boolean; // 新規登録タスク時の初期デフォルトパターンフラグ
+  comment?: string; // パターンのコメント (最大5行・各行20文字)
   items: Array<{
     taxable: boolean;
     name: string;
     amount: number | null | '';
+    note?: string; // 備考テキスト (最大10文字)
   }>;
   createdAt?: string;
   updatedAt?: string;
